@@ -18,5 +18,14 @@ thiserror.workspace = true
 tracing.workspace = true
 wasmtime.workspace = true
 
+[dev-dependencies]
+# The M0 probe builds its guest modules from WebAssembly text, so the two loops it
+# compares differ only in the one instruction that is being measured. Nothing in the
+# library reads text, so this stays a development dependency.
+wasmtime = { workspace = true, features = ["wat"] }
+
+[[example]]
+name = "m0_probe"
+
 [lints]
 workspace = true

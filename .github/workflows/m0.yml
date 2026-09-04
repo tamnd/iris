@@ -1,0 +1,85 @@
+name: M0 probe
+
+# The two M0 measurements, on every platform that iris supports. Hosted runners are
+# shared machines and the absolute numbers from them are not publishable, which is why
+# nothing here is written to a results store. What this job is for is the shape of the
+# answer: whether a host call is cheap, whether the windowed control flow costs
+# anything, and whether either of those changes character on a different architecture.
+#
+# Publishable numbers come from the machines described in the iris-bench fleet notes,
+# and they get there through a deliberate run against a registered claim.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/iris-vm/**"
+      - ".github/workflows/m0.yml"
+  pull_request:
+    paths:
+      - "crates/iris-vm/**"
+      - ".github/workflows/m0.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  probe:
+    name: Probe ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-24.04 }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm }
+          - { name: macos-aarch64, os: macos-latest }
+          - { name: windows-x86_64, os: windows-latest }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: m0-${{ matrix.name }}
+      - name: Record what this machine actually is
+        shell: bash
+        run: |
+          {
+            echo "## ${{ matrix.name }}"
+            echo '```'
+            uname -srm 2>/dev/null || echo "$RUNNER_OS $RUNNER_ARCH"
+            grep -m1 'model name' /proc/cpuinfo 2>/dev/null || true
+            sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the probe
+        run: cargo build --release --locked -p iris-vm --example m0_probe
+      - name: Run the probe
+        shell: bash
+        run: |
+          {
+            echo '```'
+            cargo run --release --locked -q -p iris-vm --example m0_probe -- --samples 15
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run the probe again for the machine readable form
+        shell: bash
+        run: |
+          cargo run --release --locked -q -p iris-vm --example m0_probe -- --json --samples 15 > m0-${{ matrix.name }}.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: m0-${{ matrix.name }}
+          path: m0-${{ matrix.name }}.json
+          retention-days: 30
