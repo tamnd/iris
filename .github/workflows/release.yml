@@ -45,7 +45,7 @@ jobs:
         shell: bash
         run: |
           rustup target add "${{ matrix.target }}"
-          cargo build --release --locked --target "${{ matrix.target }}" -p iris-cli
+          cargo build --release --locked --target "${{ matrix.target }}" -p iris
       - name: Package
         shell: bash
         run: |

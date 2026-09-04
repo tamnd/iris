@@ -37,7 +37,7 @@ Every performance claim here is settled in [`tamnd/iris-bench`](https://github.c
 | `iris-trust` | Decoder identity, content hashes, signature policy, the native substitution table. |
 | `iris-runtime` | The thing an engine embeds. Ties the above together into a scan. |
 | `iris-native` | Hash-keyed native implementations of decoders the host already knows. |
-| `iris-cli` | `iris` the command line tool: inspect, verify, decode, bundle. |
+| `iris` | `iris` the command line tool: inspect, verify, decode, bundle. |
 
 Engine integrations (DataFusion, DuckDB, a C ABI, and Python bindings) are planned and are not in this tree yet. They arrive at M6 and M7.
 
@@ -68,6 +68,10 @@ The host and decoder contract is written down in [`docs/ABI.md`](docs/ABI.md), i
 The file that carries a dataset is described in [`docs/FORMAT.md`](docs/FORMAT.md). A container is a header, a run of sections, a footer that describes them and a trailer that says where the footer is. The footer holds the schema, a reference to the decoder that reads this dataset, and a digest for every section.
 
 Parsing a container is the untrusted path, so that document also sets out the rules the parser follows and the tests and fuzz target that hold it to them.
+
+## Releasing
+
+How a version is cut, published to crates.io and what the self hosted machines are for is in [`docs/RELEASING.md`](docs/RELEASING.md). The version scheme while the major is zero is worth knowing before reading a tag: a minor tracks a completed milestone and a patch is everything in between, so `v0.1.0` is the tree where M0 finished.
 
 ## Contributing
 

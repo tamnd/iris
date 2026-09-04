@@ -1,4 +1,4 @@
-# iris-cli
+# iris
 
 `iris`, the command line tool.
 
