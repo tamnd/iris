@@ -37,8 +37,15 @@ jobs:
     timeout-minutes: 180
     environment: crates-io
     steps:
+      # The tag, not the branch. A version is one tree, and checking out whatever the default branch
+      # happens to be at the moment somebody presses the button is how it stops being one: a run that
+      # gets partway through, followed by more merges, followed by a rerun, publishes the first half
+      # of a version from one commit and the second half from another. That is not a hypothetical.
+      # 0.2.0 went out that way, with iris-guard published from a commit ten minutes before the
+      # commit that implemented it, and crates.io does not let a version be taken back.
       - uses: actions/checkout@v7
         with:
+          ref: v${{ inputs.version }}
           persist-credentials: false
 
       # No cache here on purpose. This workflow runs a handful of times per release, so the few
@@ -48,7 +55,9 @@ jobs:
       # workflow needs to mean something.
 
       # A version that does not match the tree is the one mistake this workflow cannot undo, so it
-      # is checked before anything is uploaded rather than discovered halfway through.
+      # is checked before anything is uploaded rather than discovered halfway through. With the tag
+      # checked out this catches a tag put on the wrong commit, which is the way it can still go
+      # wrong now that it cannot go wrong by the branch moving.
       - name: The version has to match the workspace
         run: |
           set -euo pipefail
