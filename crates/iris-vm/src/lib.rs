@@ -18,15 +18,26 @@
 //! | Out | `iris_scan() -> u64` | Send a `ScanRequest`, get nothing or a `Refusal` |
 //! | In | `iris.emit(ptr, len) -> u32` | One batch, as it is produced |
 //!
+//! # The deadline
+//!
+//! Every call into a decoder is metered, and it is metered whether or not anybody asked. A decoder
+//! that loops forever costs the query it was running and nothing else: the call comes back as
+//! [`Error::Deadline`] naming the decoder and the budget it was given, and the host thread that made
+//! the call is the one that gets control back. There is no switch that turns this off, because a
+//! host that can forget is a host one bad decoder away from a wedged thread.
+//!
+//! [`Vm::with_deadline`] moves the budget, which is the only knob. The default is ten seconds, which
+//! no honest decoder reading a resident buffer will ever notice.
+//!
 //! # What it does not do
 //!
 //! It does not know what a schema is, what Arrow is, or what the bytes in a buffer mean. A
 //! [`RawBatch`] is a row count, a list of nodes and a list of buffers, and whether those describe a
-//! valid array is a question for `iris-guard` at M2 and for `iris-runtime` above it.
+//! valid array is a question for `iris-guard` and for `iris-runtime` above it.
 //!
-//! It does not meter anything yet. A decoder that loops forever loops forever, which is fine while
-//! every decoder in the tree is one somebody in this repository wrote and is not fine the moment one
-//! is not. Epoch metering is M2 and it is a gate rather than a nice to have.
+//! It does not meter memory or fuel. A decoder that allocates until the engine says no gets an
+//! ordinary trap, and one that spends its whole budget on every call and returns is slow rather than
+//! hostile. Both are worth bounding and neither wedges a host, which is why the deadline came first.
 //!
 //! # The copy
 //!

@@ -128,8 +128,18 @@ The two calls that return a `u64` return an answer packed as an address in the h
 
 The host never hands the guest an address and the guest never follows one. The host asks the guest for a buffer, the guest allocates it and says where it is, and the host writes into it. That costs a copy of the source and buys a boundary where the failure mode of a host that lies is a wrong answer rather than a corrupt guest. It is the right trade while the source is resident and copied once. It stops being the right trade at M4, where a window slides many times over a source too large to copy, and at that point `require-range` starts being used and this table grows. Decoders do not change, because a decoder never sees any of this.
 
+## The deadline
+
+Every call in that table is metered, and a call that does not return inside its deadline is stopped. This is not something a host switches on. A decoder that loops forever costs the query it was running, and the host thread that made the call is the one that gets control back.
+
+A stopped call is not a refusal and it is not a trap the decoder can catch. The instance is finished, whatever it was in the middle of is gone, and the host is told which decoder it was by digest and how long it had. There is nothing a decoder can do about this and nothing it needs to do about it, because a decoder that returns never sees it.
+
+The budget is per call rather than per scan, because a call is where the host has control and is therefore the only place the question has an answer anybody can act on. A decoder that wants to do more work than one deadline allows should return what it has and be asked again, which is what batching is for. The `resumable` capability is where a decoder will say it can do that across a scan.
+
 ## What is not decided yet
 
 The filter on a scan request is opaque bytes today. Deciding what goes in there is a real design problem and it is not worth doing before there is a decoder that would use it.
 
-Metering, cancellation and the exact trap behaviour on a deadline are M2 work, and the `resumable` capability is the placeholder that keeps room for them.
+Cancellation is not the deadline. A deadline answers what happens to a decoder that will not stop, and cancellation answers what happens to a query somebody no longer wants, which is a different mechanism with a different failure mode. It is not written because there is no engine integration yet that would ask for it.
+
+Memory and fuel are not metered. A decoder that allocates until the engine refuses gets an ordinary trap today. Both are worth bounding and neither of them wedges a host, which is why the deadline came first.

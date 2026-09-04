@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use arrow_array::{Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
@@ -53,10 +54,22 @@ fn workspace_root() -> PathBuf {
         .expect("the workspace root is two levels above this crate")
 }
 
-/// Compiles the fixed width decoder for wasm32, once per test binary.
-fn decoder_module() -> &'static [u8] {
-    static MODULE: OnceLock<Vec<u8>> = OnceLock::new();
-    MODULE.get_or_init(|| {
+/// The decoder modules this test drives.
+struct Modules {
+    /// The decoder that reads the fixture.
+    fixedwidth: Vec<u8>,
+    /// The decoder that never returns.
+    looping: Vec<u8>,
+}
+
+/// Compiles the decoders for wasm32, once per test binary.
+///
+/// Both examples are built by one cargo invocation rather than one each. Almost all of the time
+/// here goes on the SDK and its dependencies, which is paid once either way, so the second decoder
+/// is close to free and two nested builds would not be.
+fn modules() -> &'static Modules {
+    static MODULES: OnceLock<Modules> = OnceLock::new();
+    MODULES.get_or_init(|| {
         let root = workspace_root();
         let target_dir = root.join("target").join("gate-wasm");
 
@@ -70,6 +83,8 @@ fn decoder_module() -> &'static [u8] {
                 "iris-decoder",
                 "--example",
                 "fixedwidth",
+                "--example",
+                "looping",
                 "--target",
                 "wasm32-unknown-unknown",
                 "--target-dir",
@@ -93,19 +108,36 @@ fn decoder_module() -> &'static [u8] {
         let out = cargo.output().expect("cargo is on the path, it ran this");
         assert!(
             out.status.success(),
-            "building the decoder for wasm32 failed. If the target is missing, run\n  \
+            "building the decoders for wasm32 failed. If the target is missing, run\n  \
              rustup target add wasm32-unknown-unknown\n\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
 
-        let module = target_dir
+        let built = target_dir
             .join("wasm32-unknown-unknown")
             .join("release")
-            .join("examples")
-            .join("fixedwidth.wasm");
-        std::fs::read(&module)
-            .unwrap_or_else(|err| panic!("cargo said it built {}: {err}", module.display()))
+            .join("examples");
+        let read = |name: &str| {
+            let path = built.join(format!("{name}.wasm"));
+            std::fs::read(&path)
+                .unwrap_or_else(|err| panic!("cargo said it built {}: {err}", path.display()))
+        };
+
+        Modules {
+            fixedwidth: read("fixedwidth"),
+            looping: read("looping"),
+        }
     })
+}
+
+/// The decoder that reads the fixture.
+fn decoder_module() -> &'static [u8] {
+    &modules().fixedwidth
+}
+
+/// The decoder that agrees to everything and then spins forever on the first scan.
+fn looping_module() -> &'static [u8] {
+    &modules().looping
 }
 
 /// The schema the fixture declares: three non-nullable `i64` columns.
@@ -152,6 +184,27 @@ fn container_at_abi(abi: (u16, u16)) -> Vec<u8> {
         abi,
         CapabilitySet::new().with(Capability::RANDOM_ACCESS),
         decoder_module().to_vec(),
+    );
+    builder.build().expect("a container this small always fits")
+}
+
+/// The same dataset, carrying the decoder that never returns.
+///
+/// Nothing about this container is malformed. It parses, its digest is right, its schema is the one
+/// every other test uses, and the decoder in it does exactly what a decoder is supposed to do right
+/// up until the scan. That is the point: the only thing wrong with it is the thing metering catches.
+fn container_that_never_returns() -> Vec<u8> {
+    let mut builder = Builder::new("readings", ROWS);
+    builder.schema(
+        SchemaEncoding::ArrowIpc,
+        schema_to_ipc(&schema()).expect("three integer columns always encode"),
+    );
+    builder.section(SectionKind::Data, source());
+    builder.embed_decoder(
+        "looping",
+        (ABI_MAJOR, ABI_MINOR),
+        CapabilitySet::new(),
+        looping_module().to_vec(),
     );
     builder.build().expect("a container this small always fits")
 }
@@ -453,5 +506,50 @@ fn a_resolver_that_finds_the_wrong_module_is_still_checked() {
     assert!(
         matches!(error, Error::Trust(Untrusted::Digest { .. })),
         "a fetched module should be checked like any other, and this said: {error}"
+    );
+}
+
+/// A decoder that never returns costs the query it was running, and says which decoder it was.
+///
+/// This is the whole reason metering is a gate. Everything else in this file is about a host
+/// refusing bytes it does not trust, and none of it helps against a module that is exactly what the
+/// container says it is and simply does not stop. The host has to be able to take its thread back.
+#[test]
+fn a_decoder_that_never_returns_is_stopped_and_named() {
+    let bytes = container_that_never_returns();
+
+    // Short enough that a failing test is over quickly. Nothing else in this file needs a deadline
+    // at all, because the default is ten seconds and every honest decoder here is done in
+    // microseconds.
+    let runtime = Runtime::new()
+        .expect("the engine builds")
+        .with_decoder_deadline(Duration::from_millis(250));
+    let dataset = runtime
+        .open(&bytes)
+        .expect("the container is well formed, that is the point of it");
+
+    let started = Instant::now();
+    let error = dataset.scan().expect_err("the decoder does not return");
+    let waited = started.elapsed();
+
+    assert!(
+        matches!(error, Error::Vm(_)),
+        "a decoder that never returns should come back from the vm, and this said: {error}"
+    );
+
+    let message = error.to_string();
+    let digest = Digest::of(looping_module()).to_string();
+    assert!(
+        message.contains(&digest),
+        "whoever reads this has to know which decoder to go and look at: {message}"
+    );
+    assert!(
+        message.contains("did not come back"),
+        "a decoder that ran away is not the same as one that broke: {message}"
+    );
+
+    assert!(
+        waited < Duration::from_secs(5),
+        "the deadline was 250ms and the scan took {waited:?}"
     );
 }

@@ -1,7 +1,9 @@
 //! One running decoder, and the four calls a host makes into it.
 
+use std::time::Duration;
+
 use iris_abi::{Message, Reader};
-use wasmtime::{Caller, Extern, Instance as WasmInstance, Linker, Memory, Store, TypedFunc};
+use wasmtime::{Caller, Extern, Instance as WasmInstance, Linker, Memory, Store, Trap, TypedFunc};
 
 use crate::batch::RawBatch;
 use crate::error::{Error, Result};
@@ -31,6 +33,9 @@ pub struct Decoder {
     start: TypedFunc<(), u64>,
     scan: TypedFunc<(), u64>,
     memory: Memory,
+    identity: String,
+    deadline: Duration,
+    ticks: u64,
 }
 
 impl core::fmt::Debug for Decoder {
@@ -44,18 +49,28 @@ impl Decoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NotADecoder`] if the module is missing an export the ABI requires, and
-    /// [`Error::Trap`] if the module's own start code fails.
+    /// Returns [`Error::NotADecoder`] if the module is missing an export the ABI requires,
+    /// [`Error::Trap`] if the module's own start code fails, and [`Error::Deadline`] if that start
+    /// code does not come back.
     pub fn instantiate(program: &Program) -> Result<Self> {
+        let decoder = program.decoder();
+        let deadline = program.deadline();
+        let ticks = program.ticks();
+
         let mut store = Store::new(program.engine(), State::default());
+
+        // Armed before the module is instantiated rather than after, because instantiating runs
+        // whatever the module put in its start function, and that is guest code like any other.
+        store.set_epoch_deadline(ticks);
+
         let mut linker = Linker::new(program.engine());
         linker
             .func_wrap("iris", "emit", emit)
-            .map_err(|err| trapped(&err))?;
+            .map_err(|err| trapped(&err, decoder, deadline))?;
 
         let instance = linker
             .instantiate(&mut store, program.module())
-            .map_err(|err| trapped(&err))?;
+            .map_err(|err| trapped(&err, decoder, deadline))?;
 
         let memory = memory_of(&instance, &mut store)?;
         store.data_mut().memory = Some(memory);
@@ -67,6 +82,9 @@ impl Decoder {
             scan: typed(&instance, &mut store, "iris_scan")?,
             memory,
             store,
+            identity: decoder.to_owned(),
+            deadline,
+            ticks,
         })
     }
 
@@ -141,16 +159,29 @@ impl Decoder {
     fn call(&mut self, func: &TypedFunc<(), u64>, record: &[u8]) -> Result<Vec<u8>> {
         let ptr = self.allocate(&self.input.clone(), record.len())?;
         self.write(ptr, record)?;
+        self.arm();
         let packed = func
             .call(&mut self.store, ())
-            .map_err(|err| trapped(&err))?;
+            .map_err(|err| trapped(&err, &self.identity, self.deadline))?;
         self.read_packed(packed)
     }
 
     fn allocate(&mut self, func: &TypedFunc<u32, u32>, len: usize) -> Result<u32> {
         let len = u32::try_from(len)
             .map_err(|_| Error::OutOfBounds("a buffer larger than a wasm32 guest can address"))?;
-        func.call(&mut self.store, len).map_err(|err| trapped(&err))
+        self.arm();
+        func.call(&mut self.store, len)
+            .map_err(|err| trapped(&err, &self.identity, self.deadline))
+    }
+
+    /// Gives the guest a fresh budget for the call that is about to happen.
+    ///
+    /// The budget is per call rather than per instance, because a call is where the host gets
+    /// control back and is therefore the only place the question "has this taken too long" has an
+    /// answer a host can act on. A decoder that spends its whole budget on every call and returns
+    /// is slow rather than hostile, and a slow decoder is a problem for whoever chose it.
+    fn arm(&mut self) {
+        self.store.set_epoch_deadline(self.ticks);
     }
 
     fn write(&mut self, ptr: u32, bytes: &[u8]) -> Result<()> {
@@ -283,6 +314,19 @@ where
 }
 
 /// Turns whatever the engine said into a message, which is all this crate lets out.
-fn trapped(err: &wasmtime::Error) -> Error {
-    Error::Trap(format!("{err:#}"))
+///
+/// A deadline is told apart from every other trap here, because the two mean different things to
+/// whoever reads the log. A trap is a decoder that broke. A deadline is a decoder that would still
+/// be running, and the number worth knowing about it is how long it was given.
+fn trapped(err: &wasmtime::Error, decoder: &str, deadline: Duration) -> Error {
+    if matches!(err.downcast_ref::<Trap>(), Some(&Trap::Interrupt)) {
+        return Error::Deadline {
+            decoder: decoder.to_owned(),
+            limit: deadline,
+        };
+    }
+    Error::Trap {
+        decoder: decoder.to_owned(),
+        detail: format!("{err:#}"),
+    }
 }
