@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -16,15 +16,15 @@ categories = ["database-implementations", "encoding", "wasm"]
 readme = "README.md"
 
 [workspace.dependencies]
-iris-abi = { path = "crates/iris-abi", version = "0.0.0" }
-iris-decoder = { path = "crates/iris-decoder", version = "0.0.0" }
-iris-format = { path = "crates/iris-format", version = "0.0.0" }
-iris-guard = { path = "crates/iris-guard", version = "0.0.0" }
-iris-native = { path = "crates/iris-native", version = "0.0.0" }
-iris-runtime = { path = "crates/iris-runtime", version = "0.0.0" }
-iris-source = { path = "crates/iris-source", version = "0.0.0" }
-iris-trust = { path = "crates/iris-trust", version = "0.0.0" }
-iris-vm = { path = "crates/iris-vm", version = "0.0.0" }
+iris-abi = { path = "crates/iris-abi", version = "0.1.0" }
+iris-decoder = { path = "crates/iris-decoder", version = "0.1.0" }
+iris-format = { path = "crates/iris-format", version = "0.1.0" }
+iris-guard = { path = "crates/iris-guard", version = "0.1.0" }
+iris-native = { path = "crates/iris-native", version = "0.1.0" }
+iris-runtime = { path = "crates/iris-runtime", version = "0.1.0" }
+iris-source = { path = "crates/iris-source", version = "0.1.0" }
+iris-trust = { path = "crates/iris-trust", version = "0.1.0" }
+iris-vm = { path = "crates/iris-vm", version = "0.1.0" }
 
 anyhow = "1.0.104"
 arrow-array = "59.3.0"
