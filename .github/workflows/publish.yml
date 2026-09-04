@@ -41,9 +41,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: publish
+      # No cache here on purpose. This workflow runs a handful of times per release, so the few
+      # minutes a cache saves are not worth much, and the cache action's cleanup walks target/, which
+      # by that point contains the unpacked copies cargo package left behind. It tries to tidy them,
+      # finds they have moved, and files a dozen red annotations on a run that succeeded. Red on this
+      # workflow needs to mean something.
 
       # A version that does not match the tree is the one mistake this workflow cannot undo, so it
       # is checked before anything is uploaded rather than discovered halfway through.
