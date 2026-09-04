@@ -91,6 +91,44 @@ pub use dataset::{Dataset, Runtime};
 pub use error::{Error, Result};
 pub use schema::{schema_from_ipc, schema_to_ipc};
 
+/// Not API. The two halves of assembling a batch, so that one can be timed against the other.
+///
+/// The guard has a cost and the project committed to publishing it before measuring it, which needs
+/// the check and the build to be reachable separately. Reaching them through a feature nobody
+/// enables by accident is better than either making them public for good or writing a second copy
+/// of the assembly path in a probe, since a probe that measures its own copy of the code is
+/// measuring the wrong thing the moment the two drift.
+///
+/// Nothing in here is covered by any stability promise, and a release may remove it.
+#[cfg(feature = "probe")]
+pub mod probe {
+    use arrow_array::RecordBatch;
+    use arrow_schema::SchemaRef;
+    use iris_vm::RawBatch;
+
+    use crate::Result;
+
+    /// Checks a batch and then builds it, which is what a scan does once per batch.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the scan path returns for this batch.
+    pub fn record_batch(schema: &SchemaRef, batch: &RawBatch) -> Result<RecordBatch> {
+        crate::assemble::record_batch(schema, batch)
+    }
+
+    /// Builds a batch that has already been checked, which is the other half of the same work.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the build half returns for this batch. Calling this on a batch that has not been
+    /// checked is not unsound, because Arrow validates what it is handed, but it is not what the
+    /// scan path does and the answer would not mean anything.
+    pub fn build(schema: &SchemaRef, batch: &RawBatch) -> Result<RecordBatch> {
+        crate::assemble::build(schema, batch)
+    }
+}
+
 /// Where decoders may come from, and why one was refused.
 ///
 /// Re-exported because [`Error::Trust`] carries an [`Untrusted`] and

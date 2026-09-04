@@ -8,8 +8,8 @@ name: Fleet
 # Three machines, not four. The fourth is a four core box with six gigabytes that is already a
 # Kubernetes node, and it sits at a load average around fifty with about a hundred megabytes free. A
 # build there would take hours, thrash, and slow down the thing the machine is actually for, which is
-# the opposite of what a fleet whose whole point is quiet hardware should be doing. Its runner is
-# gone rather than idle, so that what is registered and what is used are the same list.
+# the opposite of what a fleet whose whole point is hardware with no neighbours should be doing. Its
+# runner is gone rather than idle, so that what is registered and what is used are the same list.
 #
 # Nothing here runs on a pull request, and that is a security property rather than an oversight. A
 # self hosted runner executes whatever the workflow tells it to, so letting a pull request from a
@@ -156,5 +156,47 @@ jobs:
         with:
           name: probe-${{ matrix.name }}
           path: probe-${{ matrix.name }}.json
+          retention-days: 30
+          if-no-files-found: error
+
+  # The guard cost probe, on the same one machine and for the same reason.
+  #
+  # This is the run the published number comes from. The hosted matrix in the M2 probe workflow says
+  # whether the answer changes character across architectures, which is a question a shared machine
+  # can still answer, and a share of a ratio measured next to a neighbour doing something unknown is
+  # not a number anybody should quote.
+  guard:
+    name: Guard cost on ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: i9-13900k-64gb
+            runner: [self-hosted, windows, x64, i9-13900k-64gb]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        shell: pwsh
+        run: ./ci/toolchain.ps1
+
+      - name: Run the probe
+        shell: pwsh
+        run: |
+          cargo run --release --locked -p iris-runtime --features probe --example guard_cost -- --json --samples 1000 > guard-cost-${{ matrix.name }}.json
+
+      - name: Show it
+        shell: pwsh
+        run: |
+          cargo run --release --locked -p iris-runtime --features probe --example guard_cost -- --samples 1000
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: guard-cost-${{ matrix.name }}
+          path: guard-cost-${{ matrix.name }}.json
           retention-days: 30
           if-no-files-found: error

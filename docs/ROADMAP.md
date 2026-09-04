@@ -72,6 +72,21 @@ Two things came out of writing it that were not obvious in advance. The first is
 
 **Gate.** BLAKE3 verification is mandatory and happens before compilation, so a tampered decoder byte fails the scan with both digests in the message. `iris-guard` rejects every array in an adversarial corpus: an offset one past the end, a null count off by one, a dictionary index equal to the dictionary length, a view buffer index equal to the buffer count, a length times element width that overflows, a child array one row short, and unbounded schema nesting. The guard fuzzer runs 24 hours with no accepted but invalid array, which is the most important gate in the project because it is the only one whose failure mode is silent. Embedded decoders are the default and a decoder referenced by URI does not execute without an explicit opt in. Epoch metering is on by default and a decoder that loops forever traps within the deadline and names its digest. The cost of `iris-guard` is measured across the full platform matrix and written into the design notes, against a decision rule that was committed before the measurement.
 
+**What the guard costs.** Registered as claim C0001 in the `iris-bench` ledger, with the three band rule fixed in the first commit of this repository and the measurement taken afterwards. The guard is divided by assembling the same batch into Arrow arrays, which is the tightest denominator there is and therefore the one that shows the guard in its worst light. A scan also decodes inside the sandbox and that is where the time in a real workload goes, so each share below is an upper bound on the share of a scan by some margin.
+
+| Platform | int64-plain | int64-nullable | utf8 |
+|---|---|---|---|
+| linux-x86_64 | 0.41% | 5.87% | 23.10% |
+| linux-aarch64 | 0.90% | 2.50% | 22.63% |
+| macos-aarch64 | 5.61% | 6.56% | 17.38% |
+| windows-x86_64 | 0.47% | 2.92% | 22.08% |
+
+Strings land over fifteen percent on every platform, so the rule says the guard stays on and its cost is a design problem rather than a check to remove. Nothing about that is surprising once it is written down: checking a string column means looking at every offset, and under half a nanosecond per offset is close to the floor for a bounds check per element. What the design problem actually is, is that the offsets are checked twice, once here and once inside Arrow, and the second pass cannot be dropped without building arrays unchecked. Fixing it properly means the guard producing something Arrow will accept without re-validating, which is a change to how arrays are built and belongs with the window work rather than here.
+
+Two things came out of measuring it. The first is that most of what the guard appeared to cost was not checking. Counting nulls masked and bounds tested every byte, which is the one shape a compiler cannot vectorise, and it was fifty four percent of assembling a nullable batch by itself before it was rewritten as a popcount. Reading offsets tested the offset width once per offset. Both were a branch per element rather than a check per element, and the measurement is what found them.
+
+The second is that the note in the issue, that encoded arrays would be the cheap case, is wrong. A dictionary of 256 values behind 8192 keys is half the bytes of the column it stands for and costs 28 to 86 times more to check, because a key is a position into something else and every one has to be looked at, while a plain column of fixed width values is a single multiplication and no bit pattern of eight bytes can be out of range. The guard charges for indirection, not for bytes. That is worth knowing before the container format starts carrying dictionaries, and it is why strings are the expensive shape here.
+
 ## M3, portability
 
 `iris-vm` on Linux, macOS and Windows, with continuous integration on all three plus 64 bit Arm Linux.
@@ -116,7 +131,7 @@ Places to stop and reassess rather than push through.
 |---|---|---|
 | M0 | Is a host call affordable? | Redesign to a shared window descriptor before writing code. **Settled: yes, 2.7 to 4.7 ns against a 100 ns gate** |
 | M0 | Does windowing tax the local path? | The first bet failed. Two code paths forever, or reconsider the inversion. **Open: passes on aarch64, fails on x86-64, being reproduced on hardware that is not shared** |
-| M2 | What does validation cost? | Over 15%, keep it on and make digest pinning the documented normal path. Do not ship it off |
+| M2 | What does validation cost? | Over 15%, keep it on and make digest pinning the documented normal path. Do not ship it off. **Settled: 17 to 23% on strings against the tightest denominator there is, under 7% on everything else, on all four platforms. It stays on, iris-bench claim C0001** |
 | M5 | Do declared ranges win on object storage? | The main differentiator is gone and the design notes are wrong |
 | M5 | Is the vectorisation gap architecture neutral? | If yes, M7 drops in priority and the story gets much better |
 
@@ -124,7 +139,7 @@ Places to stop and reassess rather than push through.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| `iris-guard` is expensive | High | Decision rule committed before the measurement, at M2. Encoded arrays are the cheap case |
+| `iris-guard` is expensive | High | Decision rule committed before the measurement, at M2. Measured: strings 17 to 23%, everything else under 7%, and the encoded case turned out to be the expensive one rather than the cheap one |
 | Nobody writes decoders | High | The N times M problem is not demand. The Parquet embedding at M8 is the answer that needs no adoption |
 | Wasmtime API churn across major versions | Medium | `iris-vm` is the only crate that touches it, and the rest of the tree does not know it exists |
 | ABI 2 turns out to be needed | Medium | It is a project failure to be explained in writing, which is the correct incentive |
