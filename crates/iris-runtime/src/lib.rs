@@ -29,6 +29,12 @@
 //! `iris-trust`, `iris-trust` hands out the bytes only after hashing them, and there is no other
 //! function that returns them.
 //!
+//! Where the module is allowed to come from is a separate question and has a separate answer. By
+//! default it comes from inside the container and nowhere else, because a dataset that names a
+//! decoder by URI is asking this host to fetch something and then execute it. A host that means to
+//! allow that passes a [`Policy`] carrying a resolver it wrote, and what the resolver returns is
+//! hashed like everything else.
+//!
 //! The ABI the container declares is checked before the module is compiled too, and a refusal names
 //! the version, the decoder digest and the schema. Somebody holding a dataset they cannot open needs
 //! to know which host would read it, which decoder to go and find, and whether this is even the
@@ -78,11 +84,13 @@ pub use dataset::{Dataset, Runtime};
 pub use error::{Error, Result};
 pub use schema::{schema_from_ipc, schema_to_ipc};
 
-/// Why a decoder was refused, re-exported because [`Error::Trust`] carries one.
+/// Where decoders may come from, and why one was refused.
 ///
-/// A caller that wants to tell a tampered module apart from a container that simply has no decoder
-/// in it should not have to add a dependency to match on the difference.
-pub use iris_trust::Untrusted;
+/// Re-exported because [`Error::Trust`] carries an [`Untrusted`] and
+/// [`Runtime::with_decoder_policy`] takes a [`Policy`]. A caller that wants to tell a tampered
+/// module apart from a container that simply has no decoder in it, or that means to allow a decoder
+/// from outside the container, should not have to add a dependency to do it.
+pub use iris_trust::{Policy, Resolve, Untrusted};
 
 /// The version of this crate, as reported by build metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

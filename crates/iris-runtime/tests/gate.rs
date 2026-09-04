@@ -28,7 +28,7 @@ use arrow_array::{Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use iris_abi::{ABI_MAJOR, ABI_MINOR, Capability, CapabilitySet};
 use iris_format::{Builder, Digest, SchemaEncoding, SectionKind};
-use iris_runtime::{Error, Runtime, Untrusted, schema_to_ipc};
+use iris_runtime::{Error, Policy, Resolve, Runtime, Untrusted, schema_to_ipc};
 
 /// How many rows the fixture holds.
 const ROWS: u64 = 500;
@@ -154,6 +154,40 @@ fn container_at_abi(abi: (u16, u16)) -> Vec<u8> {
         decoder_module().to_vec(),
     );
     builder.build().expect("a container this small always fits")
+}
+
+/// The same dataset, with the decoder named rather than carried.
+///
+/// The module is not in the file at all. What is in the file is its digest, which is what a host
+/// that goes and finds it has to check the answer against.
+fn container_naming_its_decoder() -> Vec<u8> {
+    let mut builder = Builder::new("readings", ROWS);
+    builder.schema(
+        SchemaEncoding::ArrowIpc,
+        schema_to_ipc(&schema()).expect("three integer columns always encode"),
+    );
+    builder.section(SectionKind::Data, source());
+    builder.external_decoder(
+        "fixedwidth",
+        (ABI_MAJOR, ABI_MINOR),
+        CapabilitySet::new().with(Capability::RANDOM_ACCESS),
+        Digest::of(decoder_module()),
+    );
+    builder.build().expect("a container this small always fits")
+}
+
+/// A host that keeps one decoder and hands it to anybody who asks.
+///
+/// A real one would look in a directory or call a registry. This one is the same shape with the
+/// finding part removed, which is all this test needs: what matters is that the bytes it returns go
+/// through the same hash as an embedded module.
+#[derive(Debug)]
+struct OneModule(Vec<u8>);
+
+impl Resolve for OneModule {
+    fn resolve(&self, _decoder: &iris_format::DecoderRef<'_>) -> Option<Vec<u8>> {
+        Some(self.0.clone())
+    }
 }
 
 /// Every value in a column of the batches, in order.
@@ -350,5 +384,74 @@ fn one_flipped_bit_in_the_decoder_is_refused_with_both_digests() {
     assert!(
         message.contains(&found.to_string()),
         "the message does not say what arrived instead: {message}"
+    );
+}
+
+/// The M2 gate for embedded decoders being the default.
+///
+/// A dataset that names a decoder by URI is asking this host to go and get something and then run
+/// it. Out of the box it does not, and the refusal says what would have allowed it, because the
+/// alternative is an operator reading the source of a crate to find out.
+#[test]
+fn a_decoder_that_is_not_in_the_container_does_not_run_by_default() {
+    let bytes = container_naming_its_decoder();
+    let runtime = Runtime::new().expect("the engine builds");
+
+    let error = runtime
+        .open(&bytes)
+        .expect_err("a dataset that names a decoder somewhere else opened on its own say so");
+
+    let Error::Trust(Untrusted::External { name }) = &error else {
+        panic!("a referenced decoder should fail closed, and said: {error}");
+    };
+    assert_eq!(name, "fixedwidth");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("Policy::with_external_decoders_resolved_by"),
+        "the refusal does not name the setting that would allow this: {message}"
+    );
+}
+
+/// The other half of it: a host that opted in gets the dataset, and the bytes its resolver found
+/// went through the same hash the embedded case goes through.
+#[test]
+fn a_host_that_opted_in_reads_the_same_dataset() {
+    let bytes = container_naming_its_decoder();
+    let runtime = Runtime::new()
+        .expect("the engine builds")
+        .with_max_batch_rows(BATCH_ROWS)
+        .with_decoder_policy(Policy::with_external_decoders_resolved_by(OneModule(
+            decoder_module().to_vec(),
+        )));
+
+    let dataset = runtime
+        .open(&bytes)
+        .expect("the resolver found the decoder");
+    let batches = dataset.scan().expect("the decoder runs");
+    assert_eq!(
+        column_values(&batches, 0),
+        (0..ROWS).map(|r| cell(0, r)).collect::<Vec<_>>()
+    );
+}
+
+/// And a resolver that comes back with something else is caught by the digest rather than compiled.
+#[test]
+fn a_resolver_that_finds_the_wrong_module_is_still_checked() {
+    let bytes = container_naming_its_decoder();
+    let mut wrong = decoder_module().to_vec();
+    let middle = wrong.len() / 2;
+    wrong[middle] ^= 1;
+
+    let runtime = Runtime::new()
+        .expect("the engine builds")
+        .with_decoder_policy(Policy::with_external_decoders_resolved_by(OneModule(wrong)));
+
+    let error = runtime
+        .open(&bytes)
+        .expect_err("a fetched module nobody checked was compiled");
+    assert!(
+        matches!(error, Error::Trust(Untrusted::Digest { .. })),
+        "a fetched module should be checked like any other, and this said: {error}"
     );
 }

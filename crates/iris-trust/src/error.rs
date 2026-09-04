@@ -17,16 +17,49 @@ pub enum Untrusted {
     #[error("the container names no decoder, so nothing here knows how to read it")]
     Missing,
 
-    /// The decoder lives somewhere else and this crate cannot go and get it.
+    /// The decoder lives somewhere else and this host was not told it may go and get it.
     ///
-    /// Resolving one means a registry, a cache and a policy about what is allowed to be fetched,
-    /// and none of those exist yet. The digest is in the container either way, so whatever ends up
-    /// doing the fetching has something to check the bytes against.
+    /// This is the default and it fails closed. A decoder named by a URI means a dataset can cause
+    /// a fetch and then have the result executed, which may well be fine and is not something a
+    /// host should end up doing because nobody thought about it.
     #[error(
-        "the decoder for this dataset lives outside the container, which this host cannot resolve \
-         yet"
+        "the decoder named {name} for this dataset lives outside the container, and this host runs \
+         embedded decoders only. A host that means to run this one calls \
+         Policy::with_external_decoders_resolved_by and supplies the bytes, which are hashed \
+         against the digest the container gives either way."
     )]
-    External,
+    External {
+        /// The decoder's name, as the container gives it.
+        name: String,
+    },
+
+    /// The decoder lives somewhere else, this host was told it may go and get it, and it came back
+    /// with nothing.
+    ///
+    /// A resolver that cannot find a decoder is an ordinary outcome rather than an attack: the
+    /// registry is down, or the module was never published, or this host has no copy. The digest
+    /// is here because it is what the next host to try should look for.
+    #[error("nothing resolved the decoder named {name}, whose module should hash to {digest}")]
+    Unresolved {
+        /// The decoder's name, as the container gives it.
+        name: String,
+        /// The digest the module has to hash to, whoever finds it.
+        digest: Digest,
+    },
+
+    /// The container puts the decoder somewhere this build has never heard of.
+    ///
+    /// A newer writer describing a location this build does not know about is a file from the
+    /// future, and the only safe reading of one is that this host cannot read it. Guessing which of
+    /// the locations it does know about was meant is how a host ends up running the wrong bytes.
+    #[error(
+        "the container puts the decoder named {name} somewhere this build has no idea how to \
+         reach, so nothing is run"
+    )]
+    Elsewhere {
+        /// The decoder's name, as the container gives it.
+        name: String,
+    },
 
     /// The decoder reference names a section the file does not have.
     ///

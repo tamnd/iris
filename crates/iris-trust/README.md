@@ -14,6 +14,8 @@ let decoder = iris_trust::decoder(&container)?;
 
 The container's root digest covers the header and the footer, which is what makes a file cheap to open. A byte changed inside the decoder section therefore parses without complaint, and this is what catches it.
 
-Substitution, signatures and a policy about what may be fetched are still ahead.
+Where a decoder may come from is the one thing a host does decide. The default runs decoders embedded in the container and nothing else, because a dataset naming a decoder by URI is asking the host to go and fetch something and then execute it. Allowing that means building a `Policy` with a `Resolve` implementation, which is to say writing the thing that finds the module. There is no boolean, because nobody writes a registry client by accident. What the resolver returns goes through the same hash, so opting in changes where the bytes come from and changes nothing about whether they are checked.
+
+Signatures and native substitution are still ahead.
 
 Part of [iris](https://github.com/tamnd/iris). Licensed under Apache-2.0.

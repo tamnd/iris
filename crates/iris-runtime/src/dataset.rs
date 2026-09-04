@@ -9,6 +9,7 @@ use iris_abi::{
     Writer, negotiate,
 };
 use iris_format::{Container, SchemaEncoding, SectionKind};
+use iris_trust::Policy;
 use iris_vm::{Decoder, Program, Vm};
 
 use crate::assemble::record_batch;
@@ -38,10 +39,14 @@ const OFFERED: CapabilitySet = CapabilitySet::new()
 pub struct Runtime {
     vm: Vm,
     max_batch_rows: u64,
+    policy: Policy,
 }
 
 impl Runtime {
     /// A runtime with the default terms.
+    ///
+    /// The default runs decoders embedded in the container and nothing else. See
+    /// [`Runtime::with_decoder_policy`] for what changing that involves.
     ///
     /// # Errors
     ///
@@ -50,7 +55,25 @@ impl Runtime {
         Ok(Self {
             vm: Vm::new()?,
             max_batch_rows: 8192,
+            policy: Policy::embedded_only(),
         })
+    }
+
+    /// Says where this host will accept a decoder from.
+    ///
+    /// The default is embedded decoders only, which is the case the format is built around: the
+    /// dataset carries the code that reads it, so nothing is fetched and there is nothing to
+    /// decide. A dataset that names a decoder by URI is asking this host to go and get something
+    /// and then run it, and that is a decision an operator makes rather than one a file makes.
+    ///
+    /// Allowing it means handing [`iris_trust::Policy`] a resolver, which is to say writing the
+    /// thing that finds the module. Whatever it returns is hashed against the digest in the
+    /// container in exactly the same way an embedded module is, so this changes where the bytes
+    /// come from and changes nothing about whether they are checked.
+    #[must_use]
+    pub fn with_decoder_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Sets the largest batch this host will ask for.
@@ -87,7 +110,7 @@ impl Runtime {
         // hashing is all it does. Nothing downstream of this line can ask for the unverified bytes,
         // which is the whole design: there is no flag here to turn off, and adding one would mean
         // adding a function to another crate first.
-        let verified = iris_trust::decoder(&container)?;
+        let verified = self.policy.decoder(&container)?;
         let decoder = verified.record();
         let module = verified.module();
         let schema = match container.schema() {
