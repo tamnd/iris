@@ -112,7 +112,6 @@ jobs:
           fi
           echo "iris-abi depends on nothing."
 
-
   features:
     name: Feature combinations
     runs-on: ubuntu-24.04
