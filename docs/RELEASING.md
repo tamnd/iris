@@ -19,7 +19,9 @@ The tag points at the release commit rather than at whatever is on the default b
 
 ## Publishing to crates.io
 
-crates.io starts at `0.1.1` rather than at `0.1.0`, and that is deliberate. `v0.1.0` was tagged at the tree where M0 finished, before any of the publishing machinery existed, and by the time it did exist the command line package had been renamed because `iris-cli` belongs to somebody else. Publishing `0.1.0` from a tree that is not the one the tag points at would make the tag a lie for the sake of a round number.
+crates.io starts at `0.2.0` rather than at `0.1.0`, and that is deliberate. `v0.1.0` was tagged at the tree where M0 finished, before any of the publishing machinery existed, and by the time it did exist the command line package had been renamed because `iris-cli` belongs to somebody else. Publishing `0.1.0` from a tree that is not the one the tag points at would make the tag a lie for the sake of a round number. `v0.1.1` was tagged while M1 was still in progress and the first publish of it never got past the limit on new names, so rather than spend an hour creating ten names for a tree nobody would install, the first version on crates.io is the one where M1 finished.
+
+The gap is not a problem to fix later. A version that exists as a tag and not on crates.io is readable from the tag list, while a version published from the wrong tree is not readable from anywhere.
 
 The `Publish` workflow is manual, takes the version as an input, and defaults to a dry run. Run it as a dry run first. It checks that the version matches the tree, builds, tests, and then packages every crate without uploading anything.
 
@@ -29,9 +31,11 @@ When that passes, run it again with the dry run box unticked.
 
 ### Why it is slow the first time
 
-crates.io limits how fast new crate *names* can be created much harder than it limits new versions of a crate that already exists. This workspace publishes ten crates, so the first release has to wait out that limit, and `ci/publish.sh` handles it: it asks crates.io about each name, publishes the ones that are new, and waits about ten minutes between them once the initial burst is used up. Expect the first publish to take upward of an hour. Every publish after it takes a few minutes.
+crates.io limits how fast new crate *names* can be created much harder than it limits new versions of a crate that already exists. This workspace publishes ten crates, so the first release has to wait out that limit. Expect it to take upward of an hour. Every publish after it takes a few minutes.
 
-The script also skips anything already published at the requested version, so a run that fails halfway through can be rerun and picks up where it stopped rather than starting again.
+`ci/publish.sh` does not guess at how long to wait. When crates.io answers 429 it names the time the next name is due, and the script reads that time out of the response and sleeps until it, with a minute of margin. That is worth doing rather than picking an interval because the interval is not documented, it depends on how much of the account's burst is left, and a guess that is thirty seconds short costs another full wait rather than another thirty seconds.
+
+A crate that has been throttled for longer than `MAX_WAIT_PER_CRATE` stops the run instead of waiting forever. Everything published up to that point stays published, and a rerun picks up where it stopped rather than starting again, because the script skips anything already published at the requested version.
 
 ### Order
 

@@ -60,6 +60,12 @@ The numbers above go into iris-bench and get attached to claim identifiers once 
 
 **Gate.** A decoder built from the `iris-decoder` macro produces a correct `RecordBatch`, checked against arrow-rs. The negotiation path is exercised: a host at ABI 1 refuses a container declaring ABI 2 with a message naming the required ABI, the decoder digest and the schema, not a parse error. A decoder compiled against a four field request prefix runs correctly when handed a full request, which is the only test that directly checks the property the whole ABI design exists for. `iris-abi` has zero dependencies and builds `no_std`.
 
+### The M1 result
+
+The gate passes and the milestone is closed at `v0.2.0`. The test is `crates/iris-runtime/tests/gate.rs`, and it compiles `crates/iris-decoder/examples/fixedwidth.rs` for wasm32 every time it runs rather than reading a committed `.wasm`. A checked in fixture would keep passing after the ABI had drifted away from the SDK, which is the one failure this milestone exists to catch.
+
+Two things came out of writing it that were not obvious in advance. The first is that the ABI check belongs before the module is compiled, not in the handshake: a decoder built against a major version this host does not speak is never going to agree on terms, and the container has the decoder's name, its digest and the schema in hand at that point, none of which are in scope by the time a refusal comes back out of a guest. The second is that the schema in that message has to be abbreviated. A real Arrow schema printed in full is pages of nested types and gets truncated by whatever reads the log, so it is the names and types in order, capped, with a count of the rest.
+
 ## M2, trust
 
 `iris-trust` and `iris-guard`. This milestone is what separates `iris` from a research artifact, and it comes early on purpose. Validation is the price of the security claim, and a project that defers the price has not paid it.
