@@ -59,8 +59,10 @@ jobs:
           tool: cargo-nextest
       - name: Build
         run: cargo build --workspace --all-targets --locked
+      # The workspace has no tests yet, and nextest treats that as an error by
+      # default. The flag comes back out with the first real test in M1.
       - name: Test
-        run: cargo nextest run --workspace --all-targets --locked
+        run: cargo nextest run --workspace --all-targets --locked --no-tests=pass
       - name: Doc tests
         run: cargo test --workspace --doc --locked
 
@@ -196,7 +198,7 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-nextest
       - name: Collect coverage
-        run: cargo llvm-cov nextest --workspace --locked --lcov --output-path lcov.info
+        run: cargo llvm-cov nextest --workspace --locked --no-tests=pass --lcov --output-path lcov.info
       - name: Summarise
         run: cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
