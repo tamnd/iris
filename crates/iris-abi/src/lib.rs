@@ -5,13 +5,85 @@
 //! This crate is `no_std` and has no dependencies at all, and both of those are checked by CI. It
 //! ends up inside every decoder anyone writes, so anything it pulls in, everyone pays for.
 //!
-//! Nothing is implemented yet. See the milestone that owns this crate in
-//! `docs/ROADMAP.md`.
+//! # How a conversation goes
+//!
+//! The host sends a [`Hello`] saying which ABI version it speaks and what it can do. The decoder
+//! answers with a [`HelloAck`] saying what it needs. [`negotiate`] compares the two and either
+//! produces an [`Agreement`] or a [`Refusal`] that names the capability that was missing. After
+//! that the host sends [`ScanRequest`] records and the decoder sends [`RangeRequest`] records back
+//! when it needs bytes it has not been given.
+//!
+//! ```
+//! use iris_abi::{Capability, CapabilitySet, Hello, HelloAck, negotiate};
+//!
+//! let host = Hello {
+//!     abi_major: iris_abi::ABI_MAJOR,
+//!     abi_minor: iris_abi::ABI_MINOR,
+//!     window_bytes: 64 << 20,
+//!     max_batch_rows: 8192,
+//!     offered: CapabilitySet::new()
+//!         .with(Capability::REQUIRE_RANGE)
+//!         .with(Capability::SLIDING_WINDOW),
+//! };
+//! let decoder = HelloAck {
+//!     abi_major: iris_abi::ABI_MAJOR,
+//!     abi_minor: iris_abi::ABI_MINOR,
+//!     required: CapabilitySet::new().with(Capability::REQUIRE_RANGE),
+//!     optional: CapabilitySet::new().with(Capability::PROJECTION),
+//!     decoder_id: "example",
+//! };
+//!
+//! let agreed = negotiate(&host, &decoder).expect("the host offers what the decoder needs");
+//! assert!(agreed.has(Capability::REQUIRE_RANGE));
+//! // The host offers sliding windows but this decoder never asked for them, so it is not on.
+//! assert!(!agreed.has(Capability::SLIDING_WINDOW));
+//! // The decoder would like projection pushdown but this host does not do it, and that is fine
+//! // because it was optional.
+//! assert!(!agreed.has(Capability::PROJECTION));
+//! ```
+//!
+//! # What is allowed to change
+//!
+//! Adding a field to the end of a record is allowed and does not bump that record's version, because
+//! a reader that does not know about the field steps over it. Adding a record is allowed, because a
+//! reader that does not know a tag steps over the whole record. Adding a capability is allowed,
+//! because a side that does not offer it says so and the other side decides what to do.
+//!
+//! Removing a field, reordering fields, changing what a field means, or changing what a capability
+//! bit means are all breaking, and all of them are supposed to be loud rather than silent. The
+//! tests in `tests/forward_compat.rs` hold the compatible half of that line.
 
 #![no_std]
+// Nothing in here parses untrusted bytes with a pointer. If a future change needs to, it needs a
+// conversation first, because this crate is the one piece of iris that runs inside every decoder
+// anybody writes.
+#![forbid(unsafe_code)]
 
-/// The ABI revision this build of iris speaks.
+pub mod caps;
+pub mod error;
+pub mod handshake;
+pub mod message;
+pub mod record;
+pub mod wire;
+
+pub use caps::{Capability, CapabilitySet};
+pub use error::{Error, Result};
+pub use handshake::{Agreement, negotiate};
+pub use message::{
+    Hello, HelloAck, Message, Projection, RangeRequest, Refusal, RefusalReason, ScanRequest,
+};
+pub use record::{Header, Tag};
+pub use wire::{Reader, Writer};
+
+/// The major ABI version this build speaks.
 ///
-/// Bumping this is a deliberate act with a written compatibility note, not a
-/// side effect of a refactor.
-pub const ABI_VERSION: u32 = 2;
+/// Zero means the record layouts are still allowed to move. When this goes to one it means the
+/// layouts in [`message`] are frozen, and freezing them is a milestone with a written compatibility
+/// note behind it rather than something that happens because a refactor felt finished.
+pub const ABI_MAJOR: u16 = 0;
+
+/// The minor ABI version this build speaks.
+///
+/// This goes up when a field or a record or a capability is added. Two sides at different minor
+/// versions can always talk to each other, and they settle on the lower of the two.
+pub const ABI_MINOR: u16 = 1;

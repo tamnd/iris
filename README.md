@@ -61,6 +61,10 @@ rustup target add wasm32-unknown-unknown
 
 Milestones M0 through M8, each with an exit gate that a machine can check, are tracked as [milestones](https://github.com/tamnd/iris/milestones) with one issue per gate. `docs/ROADMAP.md` has the summary. M0 is a week that can invalidate everything after it, which is the point of running it first.
 
+## The ABI
+
+The host and decoder contract is written down in [`docs/ABI.md`](docs/ABI.md), including the compatibility promise: what is allowed to change without breaking a decoder that is already in the wild, and what is not. It is the only surface in the project that can ossify, so it is the only one with its own document.
+
 ## Contributing
 
 See `CONTRIBUTING.md`. The short version: the ABI is the one thing that is hard to change later, so ABI changes get more scrutiny than anything else, and a performance claim needs a run identifier from `iris-bench` before it goes into a document.
