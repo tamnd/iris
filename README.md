@@ -63,6 +63,12 @@ Milestones M0 through M8, each with an exit gate that a machine can check, are t
 
 The host and decoder contract is written down in [`docs/ABI.md`](docs/ABI.md), including the compatibility promise: what is allowed to change without breaking a decoder that is already in the wild, and what is not. It is the only surface in the project that can ossify, so it is the only one with its own document.
 
+## The container format
+
+The file that carries a dataset is described in [`docs/FORMAT.md`](docs/FORMAT.md). A container is a header, a run of sections, a footer that describes them and a trailer that says where the footer is. The footer holds the schema, a reference to the decoder that reads this dataset, and a digest for every section.
+
+Parsing a container is the untrusted path, so that document also sets out the rules the parser follows and the tests and fuzz target that hold it to them.
+
 ## Contributing
 
 See `CONTRIBUTING.md`. The short version: the ABI is the one thing that is hard to change later, so ABI changes get more scrutiny than anything else, and a performance claim needs a run identifier from `iris-bench` before it goes into a document.
