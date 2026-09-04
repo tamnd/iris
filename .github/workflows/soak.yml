@@ -48,7 +48,11 @@ env:
 jobs:
   soak:
     name: Soak ${{ inputs.target || 'fuzz_guard' }}
-    runs-on: [self-hosted, linux, x64, epyc-8c-24gb]
+    # The `soak` label is a second runner on the same machine rather than a second machine. A day
+    # long job on the only runner a box has parks it for a day, and the runner that job is queued
+    # behind is the one running the test suite every morning. Two runners on eight cores costs a
+    # fuzzer that has one core less to itself and buys back the daily suite.
+    runs-on: [self-hosted, linux, x64, epyc-8c-24gb, soak]
     # A day of fuzzing, plus the toolchain and the build in front of it, plus room for a machine
     # that is slower than it usually is.
     timeout-minutes: 1560
