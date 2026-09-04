@@ -38,5 +38,15 @@ thiserror.workspace = true
 # by running cargo, not by linking it, and a dev-dependency would build a second copy of it for the
 # host that nothing ever calls.
 
+[features]
+# Off by default and not API. It exposes the two halves of assembling a batch so the guard cost
+# probe can time one against the other. See the `probe` module for why that is a feature rather than
+# either public API or a second copy of the assembly path living in the probe.
+probe = []
+
+[[example]]
+name = "guard_cost"
+required-features = ["probe"]
+
 [lints]
 workspace = true

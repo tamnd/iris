@@ -1,0 +1,94 @@
+name: M2 probe
+
+# What iris-guard costs, on every platform iris supports.
+#
+# The gate this probe answers to was written down before the number existed: under five percent the
+# guard stays on and nothing more is said, between five and fifteen it stays on and digest pinning is
+# the documented path for a host that needs the difference, over fifteen it stays on and the cost is
+# a design problem. There is no branch in which the guard comes off, so a red number here is
+# information rather than a failure, and nothing in this workflow fails a build on one.
+#
+# Hosted runners are shared machines and the absolute numbers from them are not publishable, which is
+# why nothing here is written to a results store. What this matrix is for is the shape of the answer
+# and whether it changes character on a different architecture. The publishable number comes from the
+# one machine in the fleet whose timings mean anything, which runs the same probe in the Fleet
+# workflow.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/iris-guard/**"
+      - "crates/iris-runtime/**"
+      - ".github/workflows/m2.yml"
+  pull_request:
+    paths:
+      - "crates/iris-guard/**"
+      - "crates/iris-runtime/**"
+      - ".github/workflows/m2.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  probe:
+    name: Guard cost ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-24.04 }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm }
+          - { name: macos-aarch64, os: macos-latest }
+          - { name: windows-x86_64, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: m2-${{ matrix.name }}
+      - name: Record what this machine actually is
+        shell: bash
+        run: |
+          {
+            echo "## ${{ matrix.name }}"
+            echo '```'
+            uname -srm 2>/dev/null || echo "$RUNNER_OS $RUNNER_ARCH"
+            grep -m1 'model name' /proc/cpuinfo 2>/dev/null || true
+            sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the probe
+        run: cargo build --release --locked -p iris-runtime --features probe --example guard_cost
+      - name: Run the probe
+        shell: bash
+        run: |
+          {
+            echo '```'
+            cargo run --release --locked -q -p iris-runtime --features probe --example guard_cost -- --samples 1000
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run the probe again for the machine readable form
+        shell: bash
+        run: |
+          cargo run --release --locked -q -p iris-runtime --features probe --example guard_cost -- \
+            --json --samples 1000 > guard-cost-${{ matrix.name }}.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: guard-cost-${{ matrix.name }}
+          path: guard-cost-${{ matrix.name }}.json
+          retention-days: 30
+          if-no-files-found: error

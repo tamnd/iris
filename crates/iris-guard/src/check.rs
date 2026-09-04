@@ -254,28 +254,34 @@ fn check_validity(bitmap: &[u8], len: u64, null_count: u64, path: &str) -> Resul
 }
 
 /// How many of the first `len` bits are clear.
+///
+/// The whole bytes are counted in a loop with nothing in it but a popcount and an add, and the
+/// leftover bits at the end are masked off once afterwards. One loop that masked every byte and
+/// checked whether it had reached the length yet read more evenly and was what this was first, but
+/// a branch and a mask per byte is exactly what stops a compiler emitting vector instructions, and
+/// this loop is most of what the guard costs on a nullable column. The guard cost probe put that
+/// share at fifty four percent of assembling a batch, which is what sent somebody to read this.
 fn count_nulls(bitmap: &[u8], len: u64) -> u64 {
-    let mut nulls = 0;
-    let mut seen = 0u64;
-    for byte in bitmap {
-        if seen >= len {
-            break;
-        }
-        let left = len - seen;
-        let bits = if left >= 8 {
-            8
-        } else {
-            u32::try_from(left).unwrap_or(8)
-        };
-        let mask: u8 = if bits == 8 {
-            u8::MAX
-        } else {
-            (1u8 << bits) - 1
-        };
-        nulls += u64::from(bits) - u64::from((byte & mask).count_ones());
-        seen += u64::from(bits);
+    // A bitmap shorter than the length is caught by the caller, so this only matters to a direct
+    // caller in a test or a fuzzer: count what is actually there rather than reading past it.
+    let available = as_u64(bitmap.len()).saturating_mul(8);
+    let considered = len.min(available);
+
+    let whole = bitmap
+        .len()
+        .min(usize::try_from(considered / 8).unwrap_or(usize::MAX));
+    let mut set: u64 = bitmap[..whole]
+        .iter()
+        .map(|byte| u64::from(byte.count_ones()))
+        .sum();
+
+    let spare = u32::try_from(considered % 8).unwrap_or(0);
+    if spare != 0 {
+        let mask = (1u8 << spare) - 1;
+        set += u64::from((bitmap.get(whole).copied().unwrap_or(0) & mask).count_ones());
     }
-    nulls
+
+    considered - set
 }
 
 /// Checks the buffers an array takes for itself, once its children are known.
@@ -458,16 +464,47 @@ fn check_offsets(offsets: &[u8], len: u64, width: u64, path: &str) -> Result<u64
         ));
     }
 
+    // How wide an offset is gets decided once here rather than once per offset. It is the same two
+    // arms either way, but a width test and a fallible conversion inside a loop over eight thousand
+    // offsets is what the guard cost probe found the string case paying for, and it is the largest
+    // single thing the guard does on a batch of strings.
+    let span = usize::try_from(needed).map_err(|_| {
+        Violation::at(
+            Invariant::Size,
+            path,
+            "the offsets run past what this host can address".to_owned(),
+        )
+    })?;
+    let run = offsets.get(..span).unwrap_or(offsets);
+    let previous = if width == 8 {
+        scan_offsets::<8>(run, path, i64::from_le_bytes)?
+    } else {
+        scan_offsets::<4>(run, path, |raw| i64::from(i32::from_le_bytes(raw)))?
+    };
+
+    u64::try_from(previous).map_err(|_| {
+        Violation::at(
+            Invariant::OffsetRange,
+            path,
+            "the last offset is negative".to_owned(),
+        )
+    })
+}
+
+/// Walks a run of offsets that are all the same known width, and returns the last one.
+///
+/// The width is a constant here rather than a value, so the buffer splits into fixed size arrays
+/// once and the read is one load rather than a branch and a copy into a wider buffer. The buffer has
+/// already been checked to be long enough, and a trailing run of bytes too short to be an offset is
+/// not one, so there is nothing in the loop except the two questions being asked.
+fn scan_offsets<const W: usize>(
+    offsets: &[u8],
+    path: &str,
+    read: fn([u8; W]) -> i64,
+) -> Result<i64> {
     let mut previous: i64 = 0;
-    for index in 0..entries {
-        let at = usize::try_from(index * width).map_err(|_| {
-            Violation::at(
-                Invariant::Size,
-                path,
-                "the offsets run past what this host can address".to_owned(),
-            )
-        })?;
-        let offset = read_offset(offsets, at, width);
+    for (index, raw) in offsets.as_chunks::<W>().0.iter().enumerate() {
+        let offset = read(*raw);
 
         if offset < 0 {
             return Err(Violation::at(
@@ -485,27 +522,7 @@ fn check_offsets(offsets: &[u8], len: u64, width: u64, path: &str) -> Result<u64
         }
         previous = offset;
     }
-
-    u64::try_from(previous).map_err(|_| {
-        Violation::at(
-            Invariant::OffsetRange,
-            path,
-            "the last offset is negative".to_owned(),
-        )
-    })
-}
-
-/// Reads one offset of the given width. The caller has already checked the buffer is long enough.
-fn read_offset(bytes: &[u8], at: usize, width: u64) -> i64 {
-    if width == 8 {
-        let mut raw = [0u8; 8];
-        raw.copy_from_slice(&bytes[at..at + 8]);
-        i64::from_le_bytes(raw)
-    } else {
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(&bytes[at..at + 4]);
-        i64::from(i32::from_le_bytes(raw))
-    }
+    Ok(previous)
 }
 
 /// A length that came from a slice, which cannot be larger than a `u64` on any host iris runs on.
@@ -666,5 +683,41 @@ mod tests {
         assert_eq!(count_nulls(&[0b0001_1111], 5), 0);
         assert_eq!(count_nulls(&[0b0001_1110], 5), 1);
         assert_eq!(count_nulls(&[0x00, 0xff], 9), 8);
+    }
+
+    #[test]
+    fn counting_nulls_agrees_with_reading_the_bits_one_at_a_time() {
+        // The fast version counts whole bytes with a popcount and masks the tail once, which is a
+        // different shape from the obvious loop and is worth pinning against it. Every length from
+        // nothing to past the end of the bitmap, so the boundary at each byte is covered and so is
+        // a length longer than the bytes on hand.
+        fn one_at_a_time(bitmap: &[u8], len: u64) -> u64 {
+            let mut nulls = 0;
+            for bit in 0..len {
+                let byte = usize::try_from(bit / 8).expect("this test is small");
+                let Some(value) = bitmap.get(byte) else {
+                    break;
+                };
+                let shift = u32::try_from(bit % 8).expect("a bit in a byte");
+                if value >> shift & 1 == 0 {
+                    nulls += 1;
+                }
+            }
+            nulls
+        }
+
+        for bitmap in [
+            [0x00u8, 0x00, 0x00],
+            [0xff, 0xff, 0xff],
+            [0b1010_1010, 0b0000_1111, 0b1100_0011],
+        ] {
+            for len in 0..40 {
+                assert_eq!(
+                    count_nulls(&bitmap, len),
+                    one_at_a_time(&bitmap, len),
+                    "bitmap {bitmap:?} at length {len}"
+                );
+            }
+        }
     }
 }

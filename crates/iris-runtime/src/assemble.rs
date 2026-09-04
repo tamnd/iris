@@ -54,10 +54,21 @@ use crate::error::{Error, Result};
 /// not structurally sound, [`Error::Shape`] if it is sound but larger than this host can hold, and
 /// [`Error::Arrow`] if Arrow disagrees with the guard, which is a bug in one of them.
 pub(crate) fn record_batch(schema: &SchemaRef, batch: &RawBatch) -> Result<RecordBatch> {
-    // Nothing below this line does any checking, so nothing below this line runs until the batch has
-    // been checked.
+    // Nothing in `build` does any checking, so nothing in `build` runs until the batch has been
+    // checked. The two halves are separate functions rather than one so that the cost of the first
+    // one can be measured against the cost of the second, which is what the guard cost probe does.
+    // They are only ever called together, and the order they are called in is this line.
     iris_guard::check(schema, batch.rows, &batch.nodes, &batch.buffers)?;
+    build(schema, batch)
+}
 
+/// Builds the arrays for a batch that has already been checked.
+///
+/// # Errors
+///
+/// Returns [`Error::Shape`] if the batch is sound but larger than this host can hold, and
+/// [`Error::Arrow`] if Arrow disagrees with the guard, which is a bug in one of them.
+pub(crate) fn build(schema: &SchemaRef, batch: &RawBatch) -> Result<RecordBatch> {
     let rows = usize::try_from(batch.rows).map_err(|_| {
         Error::shape("a batch claims more rows than this host can hold in memory at once")
     })?;
