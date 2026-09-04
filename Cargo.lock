@@ -783,11 +783,11 @@ dependencies = [
 
 [[package]]
 name = "iris-abi"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "iris-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -799,14 +799,14 @@ dependencies = [
 
 [[package]]
 name = "iris-decoder"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "iris-abi",
 ]
 
 [[package]]
 name = "iris-format"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "iris-abi",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "iris-guard"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "iris-native"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "iris-abi",
  "iris-trust",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "iris-runtime"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "iris-source"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "thiserror",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "iris-trust"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "iris-format",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "iris-vm"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "iris-abi",
  "thiserror",
