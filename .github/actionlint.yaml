@@ -6,3 +6,6 @@ self-hosted-runner:
     - epyc-6c-12gb
     - epyc-8c-24gb
     - i9-13900k-64gb
+    # Not a machine. A second runner on the eight core box, so that a day long fuzzing job does not
+    # park the runner the daily test suite needs.
+    - soak
