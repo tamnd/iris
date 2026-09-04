@@ -20,18 +20,49 @@ DRY_RUN="${2:-}"
 
 # Dependency order. iris-abi first because everything else is downstream of it, and iris last
 # because it is the command line tool and depends on most of the tree.
+#
+# This list was wrong once, in the way a hand written list goes wrong: iris-native sat above
+# iris-trust and depends on it, which nothing noticed until crates.io refused the upload with three
+# names already published. The order is still written down rather than derived, because it is read
+# by anybody trying to understand the release, but it is now checked against the manifests before
+# anything is uploaded.
 CRATES=(
   iris-abi
   iris-format
   iris-guard
-  iris-native
   iris-source
   iris-trust
+  iris-native
   iris-decoder
   iris-vm
   iris-runtime
   iris
 )
+
+# Refuses a list that publishes a crate before something it depends on.
+#
+# A half published release is the expensive failure here, because crates.io does not let a version be
+# taken back. Reading the manifests is a second of work and it is the difference between finding that
+# out now and finding it out with three names already gone.
+check_order() {
+  local crate dep published=() bad=0
+  for crate in "${CRATES[@]}"; do
+    while read -r dep; do
+      [ -n "$dep" ] || continue
+      if ! printf '%s\n' "${published[@]:-}" | grep -qx "$dep"; then
+        echo "$crate depends on $dep and is published before it" >&2
+        bad=1
+      fi
+    done < <(grep -oE '^iris-[a-z]+' "crates/$crate/Cargo.toml" | sort -u)
+    published+=("$crate")
+  done
+
+  if [ "$bad" -ne 0 ]; then
+    echo "the publish order in this script is not a dependency order, so nothing is uploaded" >&2
+    return 1
+  fi
+  echo "== the publish order matches the manifests"
+}
 
 # How long to wait before retrying when crates.io throttled us and did not say when to come back.
 # Its limit on new names is roughly one every ten minutes, so ten minutes and a bit is the guess.
@@ -151,6 +182,8 @@ publish_crate() {
 # there yet, so every package after the first one fails for a reason that has nothing to do with the
 # release. `cargo package --workspace` builds a temporary registry out of the workspace, so each
 # package is verified against the versions that are about to go out rather than the ones that exist.
+check_order
+
 if [ -n "$DRY_RUN" ]; then
   echo "== packaging and verifying every crate, uploading nothing"
   cargo package --workspace --locked
