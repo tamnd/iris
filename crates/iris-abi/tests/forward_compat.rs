@@ -55,13 +55,13 @@ fn every_record_survives_a_round_trip() {
     let refusal = Refusal::new(RefusalReason::POLICY, "not today");
     // Two arrays and three buffers, which is what a nullable and a non-nullable fixed width column
     // come to.
-    let nodes = [8192u64, 0, 8192, 17];
-    let buffers = [4096u64, 65536, 69632, 1024, 70656, 65536];
+    let nodes = le_bytes(&[8192, 0, 8192, 17]);
+    let buffers = le_bytes(&[4096, 65536, 69632, 1024, 70656, 65536]);
     let batch = Batch {
         rows: 8192,
         flags: 0,
-        nodes: Nodes::from_bytes(bytemuck(&nodes)).unwrap(),
-        buffers: Buffers::from_bytes(bytemuck(&buffers)).unwrap(),
+        nodes: Nodes::from_bytes(&nodes).unwrap(),
+        buffers: Buffers::from_bytes(&buffers).unwrap(),
     };
 
     hello.encode(&mut w).unwrap();
@@ -84,12 +84,16 @@ fn every_record_survives_a_round_trip() {
 
 /// The node and buffer lists are little-endian `u64` runs, and a test that writes them by hand is
 /// harder to read than one that says so once.
-fn bytemuck(values: &[u64]) -> &'static [u8] {
+///
+/// The caller holds the result rather than being handed something with a longer lifetime, because
+/// the convenient way to get a `&'static [u8]` out of here is to leak, and a leak inside a test that
+/// Miri runs is a failure rather than a shortcut.
+fn le_bytes(values: &[u64]) -> Vec<u8> {
     let mut out = Vec::with_capacity(values.len() * 8);
-    for v in values {
-        out.extend_from_slice(&v.to_le_bytes());
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
     }
-    Vec::leak(out)
+    out
 }
 
 /// The case the whole design is for. A decoder is compiled today, the host grows two fields on the
