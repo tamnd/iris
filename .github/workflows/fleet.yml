@@ -58,7 +58,15 @@ jobs:
 
       # The hosted runners come with a toolchain. These do not, so the workflow puts one there and
       # pins it to the same version the toolchain file names.
+      #
+      # There are two copies of this because the Windows one cannot use bash. `shell: bash` resolves
+      # bash through PATH, and on a Windows machine that has WSL enabled but no distribution
+      # installed that finds the WSL launcher in system32 rather than the bash that comes with git,
+      # which then fails with a message about installing a distribution. Which one wins depends on
+      # how that machine's PATH happens to be ordered, and a workflow that depends on that is a
+      # workflow that breaks the next time somebody installs something. PowerShell is unambiguous.
       - name: Toolchain
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -71,6 +79,11 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustc --version
           cargo --version
+
+      - name: Toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./ci/toolchain.ps1 -Wasm
 
       - name: Build
         run: cargo build --workspace --all-targets --locked
@@ -110,23 +123,18 @@ jobs:
         with:
           persist-credentials: false
 
+      # Only the Windows machine is eligible for this job, so there is only the PowerShell copy here.
       - name: Toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
-          fi
-          rustup show active-toolchain || rustup toolchain install
+        shell: pwsh
+        run: ./ci/toolchain.ps1
 
       - name: Run the probe
+        shell: pwsh
         run: cargo run --release --locked -p iris-vm --example m0_probe -- --json > probe-${{ matrix.name }}.json
 
       - name: Show it
-        shell: bash
-        run: cat probe-${{ matrix.name }}.json
+        shell: pwsh
+        run: Get-Content probe-${{ matrix.name }}.json
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
