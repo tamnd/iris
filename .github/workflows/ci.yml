@@ -1,5 +1,10 @@
 name: CI
 
+# Every cache here is read on a pull request and written only on the default branch. GitHub scopes a
+# cache to the branch that wrote it, and a pull request branch can read its base branch's caches but
+# no other branch can read that pull request's, so saving from a pull request costs it half a minute
+# of upload for something nothing else will ever read. Writing from main only means every pull
+# request starts from a warm cache and none of them pay to fill one.
 on:
   push:
     branches: [main]
@@ -30,6 +35,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy
@@ -54,11 +61,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cargo-nextest
-      - name: Build
-        run: cargo build --workspace --all-targets --locked
+      # No separate build step. nextest --all-targets builds everything it would have built.
       - name: Test
         run: cargo nextest run --workspace --all-targets --locked
       - name: Doc tests
@@ -77,6 +84,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: wasm32
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build guest crates for wasm32
         run: cargo build --locked --target wasm32-unknown-unknown -p iris-abi -p iris-decoder --lib --examples
 
@@ -93,6 +101,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: no-std
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build for a bare metal target
         run: |
           rustup target add thumbv7em-none-eabi
@@ -121,6 +130,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: hack
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cargo-hack
@@ -137,6 +147,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cargo-hack
@@ -156,6 +167,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: docs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo doc --workspace --no-deps --all-features --locked
 
   miri:
@@ -173,6 +185,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: miri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Miri builds its own sysroot from source, which is most of this job's runtime and does not
+          # live in target/, so rust-cache does not pick it up without being told.
+          cache-directories: ~/.cache/miri
       - name: Run Miri over the crates that contain unsafe code
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
@@ -191,6 +207,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cargo-llvm-cov,cargo-nextest
