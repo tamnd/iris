@@ -10,7 +10,7 @@ homepage.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
-readme.workspace = true
+readme = "README.md"
 
 # Deliberately empty. iris-abi is compiled into every decoder, including decoders
 # written by people who are not us in toolchains that are not Rust, so it has to be

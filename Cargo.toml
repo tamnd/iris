@@ -13,7 +13,8 @@ homepage = "https://github.com/tamnd/iris"
 authors = ["iris contributors"]
 keywords = ["arrow", "columnar", "wasm", "self-decoding", "file-format"]
 categories = ["database-implementations", "encoding", "wasm"]
-readme = "README.md"
+# No readme here. Every crate has its own, and inheriting one from the workspace root points each
+# package at a file outside itself, which cargo packages by accident and warns about.
 
 [workspace.dependencies]
 iris-abi = { path = "crates/iris-abi", version = "0.1.0" }

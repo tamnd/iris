@@ -21,6 +21,8 @@ The tag points at the release commit rather than at whatever is on the default b
 
 The `Publish` workflow is manual, takes the version as an input, and defaults to a dry run. Run it as a dry run first. It checks that the version matches the tree, builds, tests, and then packages every crate without uploading anything.
 
+The dry run is one `cargo package --workspace` rather than ten `cargo publish --dry-run` calls, and the difference matters on a first release. A single crate dry run resolves that crate's dependencies against crates.io, so on a first release everything downstream of `iris-abi` fails to resolve for a reason that has nothing to do with whether the release is good. Packaging the workspace builds a temporary registry out of the workspace itself, so each crate is verified against the versions that are about to go out.
+
 When that passes, run it again with the dry run box unticked.
 
 ### Why it is slow the first time
