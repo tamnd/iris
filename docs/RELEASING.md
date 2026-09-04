@@ -19,6 +19,8 @@ The tag points at the release commit rather than at whatever is on the default b
 
 ## Publishing to crates.io
 
+crates.io starts at `0.1.1` rather than at `0.1.0`, and that is deliberate. `v0.1.0` was tagged at the tree where M0 finished, before any of the publishing machinery existed, and by the time it did exist the command line package had been renamed because `iris-cli` belongs to somebody else. Publishing `0.1.0` from a tree that is not the one the tag points at would make the tag a lie for the sake of a round number.
+
 The `Publish` workflow is manual, takes the version as an input, and defaults to a dry run. Run it as a dry run first. It checks that the version matches the tree, builds, tests, and then packages every crate without uploading anything.
 
 The dry run is one `cargo package --workspace` rather than ten `cargo publish --dry-run` calls, and the difference matters on a first release. A single crate dry run resolves that crate's dependencies against crates.io, so on a first release everything downstream of `iris-abi` fails to resolve for a reason that has nothing to do with whether the release is good. Packaging the workspace builds a temporary registry out of the workspace itself, so each crate is verified against the versions that are about to go out.
