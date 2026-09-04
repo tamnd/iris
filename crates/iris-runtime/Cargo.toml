@@ -21,12 +21,18 @@ arrow-schema.workspace = true
 iris-abi.workspace = true
 iris-format.workspace = true
 iris-guard.workspace = true
+iris-trust.workspace = true
 iris-vm.workspace = true
 thiserror.workspace = true
 
-# iris-native, iris-source and iris-trust are not here yet. They are all still stubs, and depending
-# on a crate before it does anything makes the dependency graph say something that is not true. Each
-# one arrives in the milestone that fills it in.
+# iris-trust is here because it owns the one thing that has to happen before a decoder is compiled:
+# hashing the module and comparing it to what the container says. This crate never touches the
+# module bytes any other way, which is what makes "verification cannot be turned off" a fact about
+# the dependency graph rather than a promise in a document.
+
+# iris-native and iris-source are not here yet. Both are still stubs, and depending on a crate
+# before it does anything makes the dependency graph say something that is not true. Each one
+# arrives in the milestone that fills it in.
 
 # No dev-dependency on iris-decoder even though the gate test uses it. The test builds it for wasm32
 # by running cargo, not by linking it, and a dev-dependency would build a second copy of it for the

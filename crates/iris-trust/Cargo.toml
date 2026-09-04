@@ -13,9 +13,19 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-blake3.workspace = true
 iris-format.workspace = true
 thiserror.workspace = true
+
+# No blake3 here, even though this crate is about hashes. The hash that matters is the one the
+# container was written with, so it has to be computed the way iris-format computes it, and hashing
+# separately here would be a second implementation of the same decision waiting to drift from the
+# first.
+
+# iris-abi is a dev-dependency rather than a dependency. Nothing in this crate needs it, but a
+# container cannot be built in a test without saying what the decoder requires, and that type is
+# iris-abi's.
+[dev-dependencies]
+iris-abi.workspace = true
 
 [lints]
 workspace = true

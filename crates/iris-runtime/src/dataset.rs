@@ -8,7 +8,7 @@ use iris_abi::{
     ABI_MAJOR, ABI_MINOR, Agreement, Capability, CapabilitySet, Hello, HelloAck, ScanRequest,
     Writer, negotiate,
 };
-use iris_format::{Container, DecoderLocation, Digest, SchemaEncoding, SectionKind};
+use iris_format::{Container, SchemaEncoding, SectionKind};
 use iris_vm::{Decoder, Program, Vm};
 
 use crate::assemble::record_batch;
@@ -75,27 +75,21 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Container`] if the bytes are not a container, [`Error::NoDecoder`] or
-    /// [`Error::ExternalDecoder`] if there is no decoder here to run, [`Error::DecoderDigest`] if
-    /// the module is not the one the container names, [`Error::SchemaEncoding`] if the schema is
-    /// missing or in an encoding this build does not read, and [`Error::Abi`] if the decoder was
-    /// built against a major ABI version this host does not speak.
+    /// Returns [`Error::Container`] if the bytes are not a container, [`Error::Trust`] if there is
+    /// no decoder here to run or the module is not the one the container names,
+    /// [`Error::SchemaEncoding`] if the schema is missing or in an encoding this build does not
+    /// read, and [`Error::Abi`] if the decoder was built against a major ABI version this host does
+    /// not speak.
     pub fn open<'a>(&self, bytes: &'a [u8]) -> Result<Dataset<'a>> {
         let container = Container::parse(bytes)?;
 
-        let decoder = container.decoder().ok_or(Error::NoDecoder)?;
-        if !matches!(decoder.location, DecoderLocation::Embedded { .. }) {
-            return Err(Error::ExternalDecoder);
-        }
-        let expected = decoder.digest;
-        let module = container.decoder_bytes().ok_or(Error::NoDecoder)?;
-        let found = Digest::of(module);
-        if found != expected {
-            return Err(Error::DecoderDigest {
-                expected: expected.to_string(),
-                found: found.to_string(),
-            });
-        }
+        // The module arrives already hashed, because iris-trust is the only way to get one and
+        // hashing is all it does. Nothing downstream of this line can ask for the unverified bytes,
+        // which is the whole design: there is no flag here to turn off, and adding one would mean
+        // adding a function to another crate first.
+        let verified = iris_trust::decoder(&container)?;
+        let decoder = verified.record();
+        let module = verified.module();
         let schema = match container.schema() {
             Some(schema) if schema.encoding == SchemaEncoding::ArrowIpc => {
                 Arc::new(schema_from_ipc(schema.bytes)?)
@@ -124,7 +118,7 @@ impl Runtime {
                 host_major: ABI_MAJOR,
                 host_minor: ABI_MINOR,
                 name: decoder.name.to_owned(),
-                digest: expected.to_string(),
+                digest: verified.digest().to_string(),
                 schema: describe(&schema),
             });
         }

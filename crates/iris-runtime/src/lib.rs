@@ -24,7 +24,10 @@
 //!
 //! The decoder module is hashed and compared against the container before it is compiled. Compiling
 //! is the first step that treats those bytes as code, so the check has to come before it rather
-//! than alongside it.
+//! than alongside it. There is no setting that turns this off, and the reason there is none is
+//! structural rather than a matter of nobody having added one: this crate gets the module from
+//! `iris-trust`, `iris-trust` hands out the bytes only after hashing them, and there is no other
+//! function that returns them.
 //!
 //! The ABI the container declares is checked before the module is compiled too, and a refusal names
 //! the version, the decoder digest and the schema. Somebody holding a dataset they cannot open needs
@@ -74,6 +77,12 @@ mod schema;
 pub use dataset::{Dataset, Runtime};
 pub use error::{Error, Result};
 pub use schema::{schema_from_ipc, schema_to_ipc};
+
+/// Why a decoder was refused, re-exported because [`Error::Trust`] carries one.
+///
+/// A caller that wants to tell a tampered module apart from a container that simply has no decoder
+/// in it should not have to add a dependency to match on the difference.
+pub use iris_trust::Untrusted;
 
 /// The version of this crate, as reported by build metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
