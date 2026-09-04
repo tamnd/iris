@@ -38,34 +38,15 @@ pub enum Error {
     #[error(transparent)]
     Guard(#[from] iris_guard::Violation),
 
-    /// The container does not say which decoder reads it.
+    /// There is no decoder here to run, or the one that is here is not the one the container names.
     ///
-    /// A container without a decoder reference is not unreadable, it is just not self decoding, and
-    /// reading it is somebody else's problem rather than this crate's.
-    #[error("the container names no decoder, so nothing here knows how to read it")]
-    NoDecoder,
-
-    /// The decoder lives somewhere else and this crate cannot go and get it.
-    ///
-    /// Resolving an external decoder means a registry, a cache and a policy about what is allowed
-    /// to be fetched, and none of those exist yet. The digest is in the container either way, so
-    /// whatever ends up doing the fetching has something to check the bytes against.
-    #[error(
-        "the decoder for this dataset lives outside the container, which this host cannot resolve yet"
-    )]
-    ExternalDecoder,
-
-    /// The module in the container does not hash to what the container says it should.
-    ///
-    /// This is the check that has to happen before the module is compiled rather than after,
-    /// because compiling is the first thing that treats those bytes as code.
-    #[error("the decoder module hashes to {found}, and the container says it should be {expected}")]
-    DecoderDigest {
-        /// What the footer claims.
-        expected: String,
-        /// What the bytes actually hash to.
-        found: String,
-    },
+    /// The digest case is the one that matters, and it is the reason this variant exists rather
+    /// than a check inline in this crate. Getting the module means calling
+    /// [`iris_trust::decoder`], calling that hashes the bytes, and there is no other way to reach
+    /// them, so a build of this crate that skips verification is not a build with a flag set wrong.
+    /// It is a build that does not compile.
+    #[error(transparent)]
+    Trust(#[from] iris_trust::Untrusted),
 
     /// The container has no schema, or one in an encoding this build does not read.
     #[error("the container's schema is {0}, and this host reads Arrow IPC")]

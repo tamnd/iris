@@ -28,7 +28,7 @@ use arrow_array::{Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use iris_abi::{ABI_MAJOR, ABI_MINOR, Capability, CapabilitySet};
 use iris_format::{Builder, Digest, SchemaEncoding, SectionKind};
-use iris_runtime::{Error, Runtime, schema_to_ipc};
+use iris_runtime::{Error, Runtime, Untrusted, schema_to_ipc};
 
 /// How many rows the fixture holds.
 const ROWS: u64 = 500;
@@ -309,19 +309,46 @@ fn a_dataset_from_a_later_abi_is_refused_with_something_worth_reading() {
     );
 }
 
+/// The M2 gate for verifying a decoder before compiling it.
+///
+/// One byte, one bit, inside the module and nowhere else. The rest of the file is exactly the file
+/// that works, which is what makes this the interesting case rather than a corrupt file test: the
+/// container's root digest covers the header and the footer, so a bit changed inside a section
+/// parses without complaint. If the digest were stored and not checked, this container would open,
+/// compile a module nobody wrote and run it. It is refused instead, and the refusal carries both
+/// digests: the one to go and look for, and the one that turned up.
 #[test]
-fn a_module_that_is_not_the_one_the_container_names_is_not_compiled() {
+fn one_flipped_bit_in_the_decoder_is_refused_with_both_digests() {
+    let module = decoder_module();
     let mut bytes = container();
-
-    // Flip a byte somewhere in the middle, which lands in one of the two sections. Whichever one it
-    // lands in, the container should notice before anything runs.
-    let middle = bytes.len() / 2;
-    bytes[middle] ^= 0xff;
+    let at = bytes
+        .windows(module.len())
+        .position(|window| window == module)
+        .expect("the builder wrote the module into the file");
+    bytes[at + module.len() / 2] ^= 1;
 
     let runtime = Runtime::new().expect("the engine builds");
-    match runtime.open(&bytes) {
-        Err(Error::DecoderDigest { .. } | Error::Container(_)) => {}
-        Err(other) => panic!("a tampered container should be refused by digest, and said: {other}"),
-        Ok(_) => panic!("a tampered container opened"),
-    }
+    let error = runtime
+        .open(&bytes)
+        .expect_err("a container carrying a module nobody wrote opened");
+
+    let Error::Trust(Untrusted::Digest { expected, found }) = &error else {
+        panic!("a flipped bit in the decoder should be refused by digest, and said: {error}");
+    };
+    assert_eq!(
+        *expected,
+        Digest::of(module),
+        "the container should still name the module that was built"
+    );
+    assert_ne!(found, expected, "the flipped bit did not change the hash");
+
+    let message = error.to_string();
+    assert!(
+        message.contains(&expected.to_string()),
+        "the message does not say which module was expected: {message}"
+    );
+    assert!(
+        message.contains(&found.to_string()),
+        "the message does not say what arrived instead: {message}"
+    );
 }
