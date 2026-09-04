@@ -20,12 +20,13 @@ arrow-ipc.workspace = true
 arrow-schema.workspace = true
 iris-abi.workspace = true
 iris-format.workspace = true
+iris-guard.workspace = true
 iris-vm.workspace = true
 thiserror.workspace = true
 
-# iris-guard, iris-native, iris-source and iris-trust are not here yet. They are all still stubs,
-# and depending on a crate before it does anything makes the dependency graph say something that is
-# not true. Each one arrives in the milestone that fills it in.
+# iris-native, iris-source and iris-trust are not here yet. They are all still stubs, and depending
+# on a crate before it does anything makes the dependency graph say something that is not true. Each
+# one arrives in the milestone that fills it in.
 
 # No dev-dependency on iris-decoder even though the gate test uses it. The test builds it for wasm32
 # by running cargo, not by linking it, and a dev-dependency would build a second copy of it for the

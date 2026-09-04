@@ -856,10 +856,8 @@ dependencies = [
 name = "iris-guard"
 version = "0.2.0"
 dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-data",
  "arrow-schema",
+ "iris-abi",
  "thiserror",
 ]
 
@@ -882,6 +880,7 @@ dependencies = [
  "arrow-schema",
  "iris-abi",
  "iris-format",
+ "iris-guard",
  "iris-vm",
  "thiserror",
 ]

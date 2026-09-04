@@ -24,8 +24,19 @@ pub enum Error {
     Record(#[from] iris_abi::Error),
 
     /// Arrow said no.
+    ///
+    /// Reaching this after the guard has passed a batch means the guard and Arrow disagree about
+    /// what a sound array is, which is a bug in one of them rather than a bad dataset.
     #[error(transparent)]
     Arrow(#[from] arrow_schema::ArrowError),
+
+    /// The guard refused an array, or a schema.
+    ///
+    /// This is the one error in this enum that says the decoder is hostile rather than merely
+    /// wrong. It carries the rule that was broken as a value, so a host can count refusals by kind
+    /// and alert on the kinds that do not happen by accident.
+    #[error(transparent)]
+    Guard(#[from] iris_guard::Violation),
 
     /// The container does not say which decoder reads it.
     ///
@@ -112,13 +123,6 @@ pub enum Error {
     /// "the batch is wrong" is not something anybody can act on.
     #[error("a batch does not match the schema: {0}")]
     Shape(String),
-
-    /// The schema uses a type this crate cannot assemble yet.
-    ///
-    /// Named rather than silently skipped. A column that quietly does not arrive is the worst
-    /// failure this crate could have.
-    #[error("this host cannot assemble a {0} yet")]
-    Unsupported(String),
 }
 
 impl Error {
