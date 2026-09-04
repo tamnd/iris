@@ -1,0 +1,105 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "40 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: Seconds to spend on each fuzz target
+        required: false
+        default: "1800"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_guard, fuzz_format]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: fuzz-${{ matrix.target }}
+          workspaces: fuzz
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-fuzz
+      - name: Restore the corpus
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Run
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            -- -max_total_time=${{ inputs.fuzz_seconds || '1800' }} -rss_limit_mb=4096
+      - name: Keep the crash if there was one
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts
+          retention-days: 30
+
+  # Concurrency bugs in the memory pool do not show up under a normal test run,
+  # which is the reason M6 has a loom gate rather than a stress test gate.
+  loom:
+    name: Loom
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: loom
+      - name: Run the loom models
+        env:
+          RUSTFLAGS: --cfg loom
+          LOOM_MAX_PREEMPTIONS: "3"
+        run: cargo test --locked -p iris-runtime --lib loom_
+
+  # Dependencies move under a pinned lock file. This says how far behind we are
+  # without changing anything.
+  outdated:
+    name: Outdated dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: cargo-outdated
+      - name: Report
+        run: |
+          {
+            echo '## Outdated dependencies'
+            echo '```'
+            cargo outdated --workspace --root-deps-only --exit-code 0 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

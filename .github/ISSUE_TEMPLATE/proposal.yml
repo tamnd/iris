@@ -1,0 +1,39 @@
+name: Design proposal
+description: A change to the architecture, the ABI or the trust model.
+labels: ["type: proposal", "status: needs triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What goes wrong today, concretely. Not the solution yet.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+    validations:
+      required: true
+  - type: checkboxes
+    id: surface
+    attributes:
+      label: What this touches
+      options:
+        - label: The ABI in iris-abi
+        - label: The trust boundary or the guard
+        - label: The container format
+        - label: The public Rust API
+        - label: None of the above
+  - type: textarea
+    id: compat
+    attributes:
+      label: Compatibility
+      description: If this touches the ABI, what does an old decoder do against a new host, and a new decoder against an old host? "It will not happen in practice" is not an answer.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including doing nothing.
+    validations:
+      required: true

@@ -1,0 +1,32 @@
+name: Performance issue
+description: Something is slower than it should be, with numbers.
+labels: ["type: performance", "status: needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A performance report without a measurement is a hypothesis. Say what you ran, how many times, and on what.
+  - type: textarea
+    id: measurement
+    attributes:
+      label: What you measured
+      description: The workload, the dataset, the number of repetitions, and the spread and not only the mean.
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: CPU model, core count, memory, storage, and whether anything else was running.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and why
+  - type: input
+    id: claim
+    attributes:
+      label: Related claim in iris-bench
+      description: If this contradicts a published claim, give its identifier.
+      placeholder: "I2"

@@ -1,0 +1,28 @@
+[package]
+name = "iris-cli"
+description = "Command line tool for inspecting, verifying and decoding iris datasets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+iris-format.workspace = true
+iris-runtime.workspace = true
+iris-source.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "iris"
+path = "src/main.rs"

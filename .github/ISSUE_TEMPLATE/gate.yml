@@ -1,0 +1,33 @@
+name: Milestone gate
+description: A checkable exit gate for one of the milestones in docs/ROADMAP.md.
+labels: ["type: gate"]
+body:
+  - type: input
+    id: milestone
+    attributes:
+      label: Milestone
+      placeholder: "M2"
+    validations:
+      required: true
+  - type: textarea
+    id: gate
+    attributes:
+      label: The gate
+      description: Stated so that a machine can check it. Not "validation works", but the specific condition that has to hold.
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: How it is checked
+      description: The command, the test name, or the workflow job that decides this.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: consequence
+    attributes:
+      label: What happens if it fails
+      description: Gates exist to change the plan. Say what the plan becomes.
+    validations:
+      required: true

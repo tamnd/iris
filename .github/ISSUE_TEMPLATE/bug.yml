@@ -1,0 +1,49 @@
+name: Bug report
+description: Something behaves incorrectly.
+labels: ["type: bug", "status: needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the bug is that an untrusted decoder or a malformed dataset reaches something it should not, that is a security report. Close this and use the private advisory link instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Commands, and a dataset or a decoder if one is needed. Smaller is better.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: "0.0.0, or a commit hash"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux x86-64
+        - Linux arm64
+        - macOS Apple silicon
+        - macOS x86-64
+        - Windows x86-64
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run with RUST_LOG=debug and RUST_BACKTRACE=1 if you can.
+      render: shell

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Design discussion
+    url: https://github.com/tamnd/iris/discussions
+    about: Arguments about the architecture, the ABI or the trust model belong here rather than in an issue.
+  - name: Security report
+    url: https://github.com/tamnd/iris/security/advisories/new
+    about: Report a vulnerability privately. Do not open a public issue for one.
+  - name: Benchmark results and reproductions
+    url: https://github.com/tamnd/iris-bench/issues
+    about: Numbers, reproductions of published figures, and anything about how a measurement was taken.

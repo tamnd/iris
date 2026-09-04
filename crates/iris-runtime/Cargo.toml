@@ -1,0 +1,29 @@
+[package]
+name = "iris-runtime"
+description = "The iris runtime an engine embeds to scan a self-decoding dataset."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+iris-abi.workspace = true
+iris-format.workspace = true
+iris-guard.workspace = true
+iris-native.workspace = true
+iris-source.workspace = true
+iris-trust.workspace = true
+iris-vm.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "iris-decoder"
+description = "Guest side SDK for writing iris decoders that compile to WebAssembly."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[dependencies]
+iris-abi.workspace = true
+
+[lints]
+workspace = true

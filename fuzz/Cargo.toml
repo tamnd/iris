@@ -1,0 +1,33 @@
+[package]
+name = "iris-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.4.2", features = ["derive"] }
+iris-format = { path = "../crates/iris-format" }
+iris-guard = { path = "../crates/iris-guard" }
+libfuzzer-sys = "0.4.13"
+
+[[bin]]
+name = "fuzz_guard"
+path = "fuzz_targets/fuzz_guard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_format"
+path = "fuzz_targets/fuzz_format.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = true

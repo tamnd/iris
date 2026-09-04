@@ -1,0 +1,9 @@
+iris
+Copyright 2026 iris contributors
+
+This product includes software developed by the iris contributors.
+
+The design of iris follows ideas published in "AnyBlox: A Framework for
+Self-Decoding Datasets" by Mateusz Gienieczko, Michael Kuschewski, Thomas
+Neumann, Viktor Leis and Jana Giceva, PVLDB 18(11), 2025. No code from the
+AnyBlox artifact is included in this repository.

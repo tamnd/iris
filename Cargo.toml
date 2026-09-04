@@ -1,0 +1,97 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/tamnd/iris"
+homepage = "https://github.com/tamnd/iris"
+authors = ["iris contributors"]
+keywords = ["arrow", "columnar", "wasm", "self-decoding", "file-format"]
+categories = ["database-implementations", "encoding", "wasm"]
+readme = "README.md"
+
+[workspace.dependencies]
+iris-abi = { path = "crates/iris-abi", version = "0.0.0" }
+iris-decoder = { path = "crates/iris-decoder", version = "0.0.0" }
+iris-format = { path = "crates/iris-format", version = "0.0.0" }
+iris-guard = { path = "crates/iris-guard", version = "0.0.0" }
+iris-native = { path = "crates/iris-native", version = "0.0.0" }
+iris-runtime = { path = "crates/iris-runtime", version = "0.0.0" }
+iris-source = { path = "crates/iris-source", version = "0.0.0" }
+iris-trust = { path = "crates/iris-trust", version = "0.0.0" }
+iris-vm = { path = "crates/iris-vm", version = "0.0.0" }
+
+anyhow = "1.0.104"
+arrow-array = "59.3.0"
+arrow-buffer = "59.3.0"
+arrow-data = "59.3.0"
+arrow-ipc = "59.3.0"
+arrow-schema = "59.3.0"
+bitflags = "2.13.1"
+blake3 = "1.8.7"
+bytes = "1.12.1"
+cap-std = "4.0.3"
+clap = { version = "4.6.6", features = ["derive", "wrap_help"] }
+half = "2.7.1"
+indexmap = "2.14.1"
+libc = "0.2.189"
+memmap2 = "0.9.11"
+object_store = "0.14.1"
+parking_lot = "0.12.5"
+rustc-hash = "2.1.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+smallvec = "1.16.0"
+thiserror = "2.0.20"
+tokio = "1.53.1"
+toml = "1.1.5"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+wasmparser = "0.258.0"
+wasmtime = { version = "48.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
+
+criterion = "0.8.2"
+insta = "1.48.0"
+proptest = "1.11.0"
+tempfile = "3.27.0"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+dbg_macro = "warn"
+missing_panics_doc = "warn"
+missing_safety_doc = "deny"
+mod_module_files = "warn"
+multiple_crate_versions = "allow"
+todo = "warn"
+undocumented_unsafe_blocks = "deny"
+
+# Panics are not aborts. An engine embedding iris-runtime needs to be able to
+# catch a panic at the sandbox boundary and fail one query instead of the process.
+[profile.release]
+codegen-units = 1
+lto = "fat"
+
+# Benchmarks and profiling need symbols, and they need the release optimisation
+# level or the numbers mean nothing.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"

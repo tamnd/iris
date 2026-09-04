@@ -1,0 +1,7 @@
+# The ABI is the one surface here that cannot be changed after decoders exist in
+# the wild, so it gets a review even when nothing else does.
+/crates/iris-abi/       @tamnd
+/crates/iris-guard/     @tamnd
+/crates/iris-trust/     @tamnd
+/.github/workflows/     @tamnd
+/deny.toml              @tamnd
