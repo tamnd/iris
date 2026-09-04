@@ -1,0 +1,135 @@
+name: Soak
+
+# Half an hour of fuzzing a night is a smoke test. What M2 asks for is a day of it without a crash
+# and without an array the guard accepted then reading out of bounds, and a day does not fit on a
+# hosted runner, where a job is stopped at six hours. So the long run happens on one of ours.
+#
+# It runs on the eight core EPYC box, which is a shared tenancy virtual machine and is the right
+# kind of machine for this. A neighbour stealing cycles changes how many inputs a day buys and
+# changes nothing about whether one of them is a crash, so the objection that keeps the benchmarks
+# off these machines does not apply to a fuzzer.
+#
+# Nothing here runs on a pull request, which is the same rule the fleet workflow follows and is a
+# security property rather than an oversight. A self hosted runner executes whatever the workflow
+# tells it to, so letting a fork's pull request reach one hands an arbitrary person a shell on a
+# machine we own. A schedule and a manual dispatch are trusted inputs. A fork's pull request is not.
+on:
+  schedule:
+    - cron: "0 2 * * 6"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which fuzz target to soak
+        required: false
+        default: fuzz_guard
+        type: choice
+        options: [fuzz_guard, fuzz_format]
+      seconds:
+        description: How long to run it for, in seconds
+        required: false
+        default: "86400"
+        type: string
+
+permissions:
+  contents: read
+
+# A soak that is still running when the next one is due should finish rather than be cancelled. The
+# whole value of the run is that it was continuous.
+concurrency:
+  group: soak
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  RUST_BACKTRACE: 1
+
+jobs:
+  soak:
+    name: Soak ${{ inputs.target || 'fuzz_guard' }}
+    runs-on: [self-hosted, linux, x64, epyc-8c-24gb]
+    # A day of fuzzing, plus the toolchain and the build in front of it, plus room for a machine
+    # that is slower than it usually is.
+    timeout-minutes: 1560
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The hosted runners come with a toolchain and this machine does not, so the workflow puts one
+      # there. Nightly rather than the pinned version because cargo-fuzz needs the sanitizer flags
+      # that only nightly takes.
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install nightly --profile minimal
+          rustc +nightly --version
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # The same key shape the nightly run uses, on purpose. A day of fuzzing finds inputs that
+      # thirty minutes does not, and the point of putting them in the shared cache is that the
+      # nightly run starts from them the next morning rather than from nothing.
+      - name: Restore the corpus
+        uses: actions/cache@v6
+        with:
+          path: fuzz/corpus/${{ inputs.target || 'fuzz_guard' }}
+          key: fuzz-corpus-${{ inputs.target || 'fuzz_guard' }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ inputs.target || 'fuzz_guard' }}-
+
+      - name: Run
+        env:
+          FUZZ_TARGET: ${{ inputs.target || 'fuzz_guard' }}
+          FUZZ_SECONDS: ${{ inputs.seconds || '86400' }}
+        run: |
+          set -euo pipefail
+          cargo +nightly fuzz run "$FUZZ_TARGET" -- \
+            -max_total_time="$FUZZ_SECONDS" \
+            -rss_limit_mb=4096 \
+            -print_final_stats=1
+
+      - name: Keep the crash if there was one
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-artifacts-${{ inputs.target || 'fuzz_guard' }}
+          path: fuzz/artifacts
+          retention-days: 90
+
+      # A corpus grows all day and most of what it grows is inputs that reach the same code as an
+      # input already in it. Minimising before the cache is written keeps the thing the nightly run
+      # downloads small enough to be worth downloading.
+      - name: Minimise the corpus
+        if: always()
+        env:
+          FUZZ_TARGET: ${{ inputs.target || 'fuzz_guard' }}
+        run: cargo +nightly fuzz cmin "$FUZZ_TARGET"
+
+      # The gate is a claim about how long this ran, so the run says how long it ran.
+      - name: Say what happened
+        if: always()
+        env:
+          FUZZ_TARGET: ${{ inputs.target || 'fuzz_guard' }}
+          FUZZ_SECONDS: ${{ inputs.seconds || '86400' }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          corpus=$(find "fuzz/corpus/$FUZZ_TARGET" -type f 2>/dev/null | wc -l | tr -d ' ')
+          {
+            echo "## Soak"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| target | \`$FUZZ_TARGET\` |"
+            echo "| asked for | $FUZZ_SECONDS seconds |"
+            echo "| corpus after minimising | $corpus inputs |"
+            echo "| outcome | $OUTCOME |"
+          } >> "$GITHUB_STEP_SUMMARY"

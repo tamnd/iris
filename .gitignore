@@ -1,5 +1,14 @@
 /target
 **/target
+
+# The fuzzing corpus is not in the repository. It is thousands of tiny files that change every time
+# anything runs, and CI already carries it between runs in a cache, which is where a corpus that
+# grows on its own belongs. Crashes are uploaded as artifacts, and one worth keeping becomes a case
+# in the guard's corpus module instead.
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/Cargo.lock
 *.profraw
 lcov.info
 .DS_Store
