@@ -66,6 +66,18 @@ state_of() {
   fi
 }
 
+# A dry run is one command rather than ten, because `cargo publish --dry-run` on a single crate
+# resolves its dependencies against crates.io, and on a first release the crate it depends on is not
+# there yet, so every package after the first one fails for a reason that has nothing to do with the
+# release. `cargo package --workspace` builds a temporary registry out of the workspace, so each
+# package is verified against the versions that are about to go out rather than the ones that exist.
+if [ -n "$DRY_RUN" ]; then
+  echo "== packaging and verifying every crate, uploading nothing"
+  cargo package --workspace --locked
+  echo "done"
+  exit 0
+fi
+
 new_names=0
 for crate in "${CRATES[@]}"; do
   state="$(state_of "$crate")"
@@ -77,11 +89,6 @@ for crate in "${CRATES[@]}"; do
     missing) echo "== $crate is a new name, publishing $VERSION" ;;
     stale) echo "== $crate exists, publishing $VERSION" ;;
   esac
-
-  if [ -n "$DRY_RUN" ]; then
-    cargo publish --locked --dry-run -p "$crate"
-    continue
-  fi
 
   # A single retry, because the failure this guards against is a rate limit or an index that has not
   # caught up, and both of those are fixed by waiting. Anything that fails twice is a real problem
