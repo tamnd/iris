@@ -45,6 +45,12 @@
 //! cannot meet and a host that runs a decoder it cannot serve are different bugs, and finding out
 //! which one happened is worth the second check.
 //!
+//! Every call into the decoder is metered, and a call that does not come back inside its deadline is
+//! stopped. A decoder with an infinite loop in it therefore costs the query it was running and
+//! nothing else. There is no setting that turns metering off either, only
+//! [`Runtime::with_decoder_deadline`] to move the budget, and the error a stopped decoder produces
+//! names it by digest.
+//!
 //! Every batch goes through `iris-guard` before a single array is built. The guard answers the
 //! bounds questions: whether the batch has the arrays and buffers the schema calls for, whether
 //! every offset is inside the buffer it indexes, whether a child is long enough for the parent that
@@ -64,9 +70,10 @@
 //! throughput, and M4 is where the window arrives. No decoder changes when it does, because a
 //! decoder only ever sees the range calls the SDK makes on its behalf.
 //!
-//! Nothing is metered. A decoder that loops forever loops forever, which is survivable while every
-//! decoder in the tree is one somebody in this repository wrote and stops being survivable the
-//! moment one is not. That is M2 and it is a gate rather than a nice to have.
+//! Only time is metered. A decoder that allocates until the engine refuses gets an ordinary trap
+//! rather than a message about memory, and a decoder that spends its whole deadline on every call
+//! and returns is merely slow. Both are worth bounding, and neither of them wedges a host, which is
+//! why the deadline was the one that had to come first.
 //!
 //! Unions, dictionaries, run end encoding and the view types are refused by name rather than
 //! skipped. A column that quietly does not arrive is the worst failure this crate could have. The

@@ -23,9 +23,39 @@ pub enum Error {
     #[error("the module is not a decoder: {0}")]
     NotADecoder(String),
 
-    /// A call into the guest trapped, ran out of its budget, or returned an error.
-    #[error("the decoder trapped: {0}")]
-    Trap(String),
+    /// The host could not start the thread that meters decoders.
+    ///
+    /// This refuses to build an engine rather than build an unmetered one. An engine that cannot be
+    /// interrupted is exactly the thing this crate is not willing to hand out, and a host that
+    /// cannot spawn a thread has a problem that will not be improved by running foreign code.
+    #[error("the thread that meters decoders did not start, so no engine was built: {0}")]
+    Metering(String),
+
+    /// A call into the guest trapped or returned an error.
+    ///
+    /// The decoder is named because a trap is a specific set of bytes misbehaving and somebody has
+    /// to go and look at them. iris names it by digest, which is the only identity a decoder has
+    /// that it did not choose for itself.
+    #[error("the decoder {decoder} trapped: {detail}")]
+    Trap {
+        /// What the host calls the decoder, which for iris is its digest.
+        decoder: String,
+        /// What the engine said.
+        detail: String,
+    },
+
+    /// A call into the guest did not come back inside its deadline and was stopped.
+    ///
+    /// This is the loop that never ends, and it costs a query rather than a host thread. The
+    /// decoder is named by digest for the same reason a trap names it: whoever reads this has to
+    /// find the bytes that did it.
+    #[error("the decoder {decoder} did not come back within {limit:?}, so it was stopped")]
+    Deadline {
+        /// What the host calls the decoder, which for iris is its digest.
+        decoder: String,
+        /// How long it was given.
+        limit: std::time::Duration,
+    },
 
     /// The guest handed back an address or a length that is not inside its own memory.
     ///

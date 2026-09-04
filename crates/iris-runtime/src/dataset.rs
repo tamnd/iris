@@ -1,6 +1,7 @@
 //! Opening a container and pulling batches out of it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -76,6 +77,22 @@ impl Runtime {
         self
     }
 
+    /// Sets how long one call into a decoder may take before it is stopped.
+    ///
+    /// Every call is metered and there is no way to ask for one that is not, so this moves the
+    /// budget rather than deciding whether there is one. The default is ten seconds, which is a
+    /// bound on a decoder that never returns rather than a bound on a decoder doing work: reading
+    /// eight thousand rows out of a resident buffer is milliseconds.
+    ///
+    /// A host serving interactive queries has a much better number for this than a default does, and
+    /// the cost of getting it wrong is an [`Error::Vm`] carrying [`iris_vm::Error::Deadline`], which
+    /// names both the decoder and the budget it was given.
+    #[must_use]
+    pub fn with_decoder_deadline(mut self, deadline: Duration) -> Self {
+        self.vm = self.vm.with_deadline(deadline);
+        self
+    }
+
     /// Sets the largest batch this host will ask for.
     ///
     /// A decoder is told this number and is expected to respect it, because the host is the side
@@ -146,7 +163,10 @@ impl Runtime {
             });
         }
 
-        let program = self.vm.compile(module)?;
+        // The digest goes with the module, so that a decoder that traps or runs away is named in the
+        // error by the one identity it did not choose for itself. The name in the container is what
+        // the decoder calls itself, and a decoder that has been swapped would still be called that.
+        let program = self.vm.compile(module, &verified.digest().to_string())?;
 
         // M1 hands the decoder one run of bytes and calls it the source, so a container with two
         // data sections has no unambiguous answer to what the decoder should see. Refusing is
