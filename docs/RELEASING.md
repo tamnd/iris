@@ -45,15 +45,18 @@ The command line tool is the package named `iris`, not `iris-cli`, because `iris
 
 ## The fleet
 
-Four self hosted runners exist alongside the hosted ones, and the `Fleet` workflow uses them. They are labelled by hardware rather than by hostname, because a hostname tells a reader nothing they can compare against:
+Three self hosted runners exist alongside the hosted ones, and the `Fleet` workflow uses them. They are labelled by hardware rather than by hostname, because a hostname tells a reader nothing they can compare against:
 
-| Label | What it is |
-| --- | --- |
-| `epyc-4c-6gb` | AMD EPYC virtual machine, 4 vCPUs, 6 GB, Ubuntu 24.04 |
-| `epyc-6c-12gb` | AMD EPYC virtual machine, 6 vCPUs, 12 GB, Ubuntu 24.04 |
-| `epyc-8c-24gb` | AMD EPYC virtual machine, 8 vCPUs, 24 GB, Ubuntu 24.04 |
-| `i9-13900k-64gb` | Intel Core i9-13900K, 32 threads, 64 GB, Windows 11 |
+| Label | What it is | Jobs |
+| --- | --- | --- |
+| `epyc-6c-12gb` | AMD EPYC virtual machine, 6 vCPUs, 12 GB, Ubuntu 24.04 | 4 |
+| `epyc-8c-24gb` | AMD EPYC virtual machine, 8 vCPUs, 24 GB, Ubuntu 24.04 | 6 |
+| `i9-13900k-64gb` | Intel Core i9-13900K, 32 threads, 64 GB, Windows 11 | 16 |
+
+The job count is set per machine rather than left to cargo, which sizes itself by core count and pays no attention to memory. Building Wasmtime wants well over a gigabyte per job and the smaller machines here do not have that much per core.
+
+A fourth machine, four cores and six gigabytes, is not in the fleet. It is already a Kubernetes node and sits at a load average around fifty with about a hundred megabytes free, so a build there would take hours, thrash, and slow down the thing the machine is actually for. Its runner was removed rather than left idle, so that what is registered and what is used are the same list.
 
 Nothing in the `Fleet` workflow runs on a pull request, and that is a security property rather than an oversight. A self hosted runner executes whatever the workflow tells it to, so letting a pull request from a fork reach one hands an arbitrary person a shell on a machine we own. Push to the default branch, a schedule and a manual dispatch are trusted inputs. A fork's pull request is not.
 
-The three EPYC machines are shared tenancy virtual machines, so they run the test suite, which is a correctness question, and they do not produce any number with a duration in it. The one machine that does is the i9-13900K, and the reasoning behind that split is written down in the iris-bench machine notes rather than repeated here.
+The two EPYC machines are shared tenancy virtual machines, so they run the test suite, which is a correctness question, and they do not produce any number with a duration in it. The one machine that does is the i9-13900K, and the reasoning behind that split is written down in the iris-bench machine notes rather than repeated here.

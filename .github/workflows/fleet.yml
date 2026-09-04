@@ -1,10 +1,15 @@
 name: Fleet
 
 # The hosted runners are shared machines, which is fine for a build and is not fine for a number.
-# These are not shared. They are four boxes nobody else is on, and they exist in this workflow for
-# two reasons: to run the suite on hardware whose neighbours are not a variable, and to settle the
-# M0 window refill question, which currently reads as an architecture result and may only be a
-# shared runner result.
+# These are ours, and they exist in this workflow for two reasons: to run the suite on hardware whose
+# neighbours are not a variable, and to settle the M0 window refill question, which reads as an
+# architecture result and may only be a shared runner result.
+#
+# Three machines, not four. The fourth is a four core box with six gigabytes that is already a
+# Kubernetes node, and it sits at a load average around fifty with about a hundred megabytes free. A
+# build there would take hours, thrash, and slow down the thing the machine is actually for, which is
+# the opposite of what a fleet whose whole point is quiet hardware should be doing. Its runner is
+# gone rather than idle, so that what is registered and what is used are the same list.
 #
 # Nothing here runs on a pull request, and that is a security property rather than an oversight. A
 # self hosted runner executes whatever the workflow tells it to, so letting a pull request from a
@@ -43,14 +48,19 @@ jobs:
           # Named for what they are. A hostname tells a reader nothing they can compare against and
           # a role name tells them nothing about why a number came out the way it did, so the label
           # is the hardware: what the chip is and how much of it there is.
-          - name: epyc-4c-6gb
-            runner: [self-hosted, linux, x64, epyc-4c-6gb]
+          #
+          # jobs is set per machine rather than left to cargo, which sizes itself by core count and
+          # not by memory. Building wasmtime wants well over a gigabyte per job, and the smaller box
+          # here has less headroom than that times its core count.
           - name: epyc-6c-12gb
             runner: [self-hosted, linux, x64, epyc-6c-12gb]
+            jobs: 4
           - name: epyc-8c-24gb
             runner: [self-hosted, linux, x64, epyc-8c-24gb]
+            jobs: 6
           - name: i9-13900k-64gb
             runner: [self-hosted, windows, x64, i9-13900k-64gb]
+            jobs: 16
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -85,16 +95,22 @@ jobs:
         shell: pwsh
         run: ./ci/toolchain.ps1 -Wasm
 
-      - name: Build
-        run: cargo build --workspace --all-targets --locked
-
+      # No separate build step. `cargo test --all-targets` builds everything this would have built,
+      # so a build step ahead of it is a second pass over the same crates for the sake of a nicer
+      # failure message, and on the smaller machines here that is minutes rather than seconds.
       - name: Test
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.jobs }}
         run: cargo test --workspace --all-targets --locked
 
       - name: Doc tests
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.jobs }}
         run: cargo test --workspace --doc --locked
 
       - name: Guest crates still build for wasm32
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.jobs }}
         run: cargo build --locked --target wasm32-unknown-unknown -p iris-abi -p iris-decoder --lib --examples
 
   # The M0 probe, on the one machine in the fleet whose timings mean anything.
@@ -103,11 +119,11 @@ jobs:
   # a shared hosted runner, which leaves two explanations: the architecture, or the neighbours. This
   # job separates them, and it runs on exactly one machine because only one of ours is eligible.
   #
-  # The three EPYC boxes are shared tenancy virtual machines. The guest cannot set the frequency
-  # governor, cannot disable turbo, cannot pin to a physical core and cannot see what a neighbour is
-  # doing, so a duration measured on one is not evidence about anything. They run the suite above,
-  # which is a correctness question, and they do not run this. The rule and the reasoning are in the
-  # iris-bench machine notes and this workflow follows them rather than restating them.
+  # The EPYC boxes are shared tenancy virtual machines. The guest cannot set the frequency governor,
+  # cannot disable turbo, cannot pin to a physical core and cannot see what a neighbour is doing, so
+  # a duration measured on one is not evidence about anything. They run the suite above, which is a
+  # correctness question, and they do not run this. The rule and the reasoning are in the iris-bench
+  # machine notes and this workflow follows them rather than restating them.
   probe:
     name: M0 probe on ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
