@@ -90,25 +90,29 @@ if [ -n "$DRY_RUN" ]; then
   exit 0
 fi
 
-# The token is checked before anything is uploaded, because the way this fails otherwise is bad out
-# of proportion to the mistake. cargo does not find out the token is wrong until it has packaged,
-# verified and uploaded a crate, and the retry in the loop below then waits ten minutes and does the
-# whole thing again before giving up. One request here turns a twenty minute failure into a one
-# second one. Nothing prints the token, only what crates.io thought of it.
+# The token is looked at before anything is uploaded, because the way a bad one fails otherwise is
+# bad out of proportion to the mistake. cargo does not look at the token until it has packaged the
+# crate, verified it and uploaded it, and the retry in the loop below then waits ten minutes and
+# does the whole thing again before giving up, so a pair of stray quotes costs twenty minutes to
+# find out about.
+#
+# This is a shape check and not an authorisation check, and the difference is worth being honest
+# about. crates.io has no read only endpoint that answers whether a token is live: /me is reserved
+# for the website and refuses every API token, and the endpoints that do accept one ignore it. So
+# what is checked here is the failure that actually happened, which is a token stored from a shell
+# file with the quotes still around it. A token that is well formed but revoked, or one without
+# publish scope, is still found the slow way. Nothing here prints the token.
 if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
   echo "CARGO_REGISTRY_TOKEN is not set, so there is nothing to publish with" >&2
   exit 1
 fi
-me="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --header "User-Agent: iris release (https://github.com/tamnd/iris)" \
-  --header "Authorization: $CARGO_REGISTRY_TOKEN" \
-  "https://crates.io/api/v1/me")"
-if [ "$me" != "200" ]; then
-  echo "crates.io answered $me when asked who this token belongs to, so it is not a token it will" >&2
-  echo "accept. A token set from a shell file with the quotes still around it is the usual cause." >&2
+if [[ ! $CARGO_REGISTRY_TOKEN =~ ^[A-Za-z0-9]{20,}$ ]]; then
+  echo "CARGO_REGISTRY_TOKEN is not shaped like a crates.io token, which is twenty or more letters" >&2
+  echo "and digits and nothing else. Quotes carried over from a shell file are the usual cause, and" >&2
+  echo "crates.io answers that with a 401 about the token format after it has taken the upload." >&2
   exit 1
 fi
-echo "== the token is one crates.io recognises"
+echo "== the token is shaped like a crates.io token"
 
 new_names=0
 for crate in "${CRATES[@]}"; do

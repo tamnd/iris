@@ -45,7 +45,9 @@ The command line tool is the package named `iris`, not `iris-cli`, because `iris
 
 `CARGO_REGISTRY_TOKEN` is a repository secret and is read only by the `Publish` workflow. It is not in the repository, it is not in any script, and nothing else can see it.
 
-`ci/publish.sh` asks crates.io whether it recognises the token before it uploads anything. That check exists because of how the alternative fails: cargo does not discover a bad token until it has packaged, verified and uploaded a crate, at which point the retry in the script waits ten minutes and does the whole thing again before giving up, so a wrong token costs twenty minutes to find out about. One request costs a second. The mistake it catches most often is a token copied out of a shell file with the quotes still around it, which crates.io rejects as not being a token at all.
+`ci/publish.sh` looks at the shape of the token before it uploads anything. That check exists because of how the alternative fails: cargo does not look at the token until it has packaged, verified and uploaded a crate, at which point the retry in the script waits ten minutes and does the whole thing again before giving up, so a wrong token costs twenty minutes to find out about. The mistake it catches is a token copied out of a shell file with the quotes still around it, which crates.io rejects as not being a token at all.
+
+It is a shape check rather than an authorisation check, and that is a limitation rather than a choice. crates.io has no read only endpoint that will say whether a token is live: `/me` is reserved for the website and refuses every API token, and the endpoints that do accept one ignore it. A token that is well formed but revoked still gets found the slow way.
 
 ## The fleet
 
