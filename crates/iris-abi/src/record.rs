@@ -33,6 +33,8 @@ impl Tag {
     pub const SCAN_REQUEST: Self = Self(0x0010);
     /// The decoder asking for bytes of the source it has not been given yet.
     pub const RANGE_REQUEST: Self = Self(0x0020);
+    /// The decoder handing back one batch of decoded rows.
+    pub const BATCH: Self = Self(0x0030);
 
     /// The first tag in the range reserved for private extensions.
     ///
@@ -55,6 +57,7 @@ impl Tag {
             Self::REFUSAL => Some("Refusal"),
             Self::SCAN_REQUEST => Some("ScanRequest"),
             Self::RANGE_REQUEST => Some("RangeRequest"),
+            Self::BATCH => Some("Batch"),
             _ => None,
         }
     }

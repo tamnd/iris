@@ -5,8 +5,9 @@
 //! bit may appear. Anything else is a break.
 
 use iris_abi::{
-    ABI_MAJOR, ABI_MINOR, Capability, CapabilitySet, Error, Hello, HelloAck, Message, Projection,
-    RangeRequest, Reader, Refusal, RefusalReason, ScanRequest, Tag, Writer, negotiate,
+    ABI_MAJOR, ABI_MINOR, Batch, Buffers, Capability, CapabilitySet, Error, Hello, HelloAck,
+    Message, Nodes, Projection, RangeRequest, Reader, Refusal, RefusalReason, ScanRequest, Tag,
+    Writer, negotiate,
 };
 
 fn buf() -> [u8; 512] {
@@ -23,6 +24,7 @@ fn host_hello() -> Hello {
             .with(Capability::REQUIRE_RANGE)
             .with(Capability::SLIDING_WINDOW)
             .with(Capability::PROJECTION),
+        source_bytes: 1 << 33,
     }
 }
 
@@ -51,12 +53,23 @@ fn every_record_survives_a_round_trip() {
         len: 1 << 20,
     };
     let refusal = Refusal::new(RefusalReason::POLICY, "not today");
+    // Two arrays and three buffers, which is what a nullable and a non-nullable fixed width column
+    // come to.
+    let nodes = le_bytes(&[8192, 0, 8192, 17]);
+    let buffers = le_bytes(&[4096, 65536, 69632, 1024, 70656, 65536]);
+    let batch = Batch {
+        rows: 8192,
+        flags: 0,
+        nodes: Nodes::from_bytes(&nodes).unwrap(),
+        buffers: Buffers::from_bytes(&buffers).unwrap(),
+    };
 
     hello.encode(&mut w).unwrap();
     ack.encode(&mut w).unwrap();
     scan.encode(&mut w).unwrap();
     range.encode(&mut w).unwrap();
     refusal.encode(&mut w).unwrap();
+    batch.encode(&mut w).unwrap();
     let n = w.position();
 
     let mut r = Reader::new(&storage[..n]);
@@ -65,7 +78,22 @@ fn every_record_survives_a_round_trip() {
     assert_eq!(r.message().unwrap(), Message::ScanRequest(scan));
     assert_eq!(r.message().unwrap(), Message::RangeRequest(range));
     assert_eq!(r.message().unwrap(), Message::Refusal(refusal));
+    assert_eq!(r.message().unwrap(), Message::Batch(batch));
     assert!(r.is_empty());
+}
+
+/// The node and buffer lists are little-endian `u64` runs, and a test that writes them by hand is
+/// harder to read than one that says so once.
+///
+/// The caller holds the result rather than being handed something with a longer lifetime, because
+/// the convenient way to get a `&'static [u8]` out of here is to leak, and a leak inside a test that
+/// Miri runs is a failure rather than a shortcut.
+fn le_bytes(values: &[u64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 8);
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
 }
 
 /// The case the whole design is for. A decoder is compiled today, the host grows two fields on the
@@ -85,6 +113,7 @@ fn a_record_may_grow_at_the_end() {
         w.u64(hello.window_bytes)?;
         w.u64(hello.max_batch_rows)?;
         w.var_bytes(hello.offered.as_bytes())?;
+        w.u64(hello.source_bytes)?;
         w.u64(0xdead_beef)?;
         w.var_str("a field from the future")
     })
@@ -95,6 +124,59 @@ fn a_record_may_grow_at_the_end() {
     assert_eq!(r.message().unwrap(), Message::Hello(hello));
     // And the reader is left after the whole record, not in the middle of it.
     assert!(r.is_empty());
+}
+
+/// The same rule read from the other end. `source_bytes` was appended to `Hello` after the ABI
+/// shipped, so a host built before it existed writes a record that simply stops, and a decoder built
+/// after it has to read that as absent rather than as damage.
+#[test]
+fn a_field_a_later_version_appended_reads_as_absent_when_the_writer_predates_it() {
+    let hello = host_hello();
+    let mut storage = buf();
+    let mut w = Writer::new(&mut storage);
+
+    w.record(Tag::HELLO, Hello::VERSION, |w| {
+        w.u16(hello.abi_major)?;
+        w.u16(hello.abi_minor)?;
+        w.u32(0)?;
+        w.u64(hello.window_bytes)?;
+        w.u64(hello.max_batch_rows)?;
+        w.var_bytes(hello.offered.as_bytes())
+    })
+    .unwrap();
+    let n = w.position();
+
+    let mut r = Reader::new(&storage[..n]);
+    let Message::Hello(decoded) = r.message().unwrap() else {
+        panic!("that was a Hello");
+    };
+    assert_eq!(decoded.source_bytes, 0);
+    assert_eq!(decoded.offered, hello.offered);
+}
+
+/// Absent and damaged are different. Nothing left where a field would start means an older writer.
+/// Some bytes but not enough means the payload was cut, and reading a short value as a default is
+/// how a corrupt record turns into a wrong answer instead of an error.
+#[test]
+fn a_field_that_starts_and_then_stops_is_damage_rather_than_an_older_writer() {
+    let hello = host_hello();
+    let mut storage = buf();
+    let mut w = Writer::new(&mut storage);
+
+    w.record(Tag::HELLO, Hello::VERSION, |w| {
+        w.u16(hello.abi_major)?;
+        w.u16(hello.abi_minor)?;
+        w.u32(0)?;
+        w.u64(hello.window_bytes)?;
+        w.u64(hello.max_batch_rows)?;
+        w.var_bytes(hello.offered.as_bytes())?;
+        w.raw(&[0, 0, 0, 0])
+    })
+    .unwrap();
+    let n = w.position();
+
+    let mut r = Reader::new(&storage[..n]);
+    assert!(matches!(r.message(), Err(Error::Truncated { .. })));
 }
 
 /// The other half of the same rule. A record may only grow, so a payload that is missing a field

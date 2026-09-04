@@ -29,6 +29,15 @@ pub struct Hello {
     pub max_batch_rows: u64,
     /// What the host can do.
     pub offered: CapabilitySet,
+    /// How many bytes the source has in total, or zero if the host is not saying.
+    ///
+    /// A decoder that has to find its own footer needs this, and a decoder that reads forwards from
+    /// the start does not, which is why zero is allowed rather than being an error.
+    ///
+    /// This field was appended after the ABI shipped, so it is the first real exercise of the
+    /// grow-at-the-end rule. A host built before it existed writes a `Hello` that ends after
+    /// `offered`, and a decoder built after it reads zero and carries on.
+    pub source_bytes: u64,
 }
 
 impl Hello {
@@ -47,7 +56,8 @@ impl Hello {
             w.u32(0)?;
             w.u64(self.window_bytes)?;
             w.u64(self.max_batch_rows)?;
-            w.var_bytes(self.offered.as_bytes())
+            w.var_bytes(self.offered.as_bytes())?;
+            w.u64(self.source_bytes)
         })
     }
 
@@ -65,12 +75,14 @@ impl Hello {
         let window_bytes = p.u64()?;
         let max_batch_rows = p.u64()?;
         let offered = p.capability_set()?;
+        let source_bytes = p.opt_u64()?.unwrap_or(0);
         Ok(Self {
             abi_major,
             abi_minor,
             window_bytes,
             max_batch_rows,
             offered,
+            source_bytes,
         })
     }
 }
@@ -420,6 +432,238 @@ impl RangeRequest {
     }
 }
 
+/// One array in a batch, in the flattened order the schema puts them in.
+///
+/// This is the same pair Arrow IPC calls a field node, and it is here for the same reason: a
+/// column's length and null count are not derivable from its buffers, so somebody has to say them
+/// out loud.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Node {
+    /// How many slots the array has.
+    pub length: u64,
+    /// How many of those slots are null.
+    pub null_count: u64,
+}
+
+impl Node {
+    /// How wide the encoded form is, in bytes.
+    pub const SIZE: usize = 16;
+}
+
+/// Where one Arrow buffer sits in the decoder's memory.
+///
+/// Offsets are 64 bits wide even though a `wasm32` guest cannot address more than four gigabytes,
+/// because the width of a guest address is not something worth writing into a format that ossifies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BufferRef {
+    /// Where the buffer starts in the decoder's memory.
+    pub offset: u64,
+    /// How many bytes long it is.
+    pub len: u64,
+}
+
+impl BufferRef {
+    /// How wide the encoded form is, in bytes.
+    pub const SIZE: usize = 16;
+
+    /// One past the last byte, or `None` if the two fields overflow.
+    #[must_use]
+    pub const fn end(&self) -> Option<u64> {
+        self.offset.checked_add(self.len)
+    }
+}
+
+/// A list of [`Node`]s, still in its encoded form.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Nodes<'a> {
+    raw: &'a [u8],
+}
+
+impl<'a> Nodes<'a> {
+    /// No arrays at all.
+    pub const EMPTY: Self = Self { raw: &[] };
+
+    /// Wraps the encoded form.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Malformed`] if the length is not a whole number of nodes.
+    pub fn from_bytes(raw: &'a [u8]) -> Result<Self> {
+        if !raw.len().is_multiple_of(Node::SIZE) {
+            return Err(Error::Malformed(
+                "a node list must be a whole number of sixteen byte nodes",
+            ));
+        }
+        Ok(Self { raw })
+    }
+
+    /// How many arrays are described.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.raw.len() / Node::SIZE
+    }
+
+    /// Whether no arrays are described.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.raw.is_empty()
+    }
+
+    /// The nodes, in order.
+    pub fn iter(self) -> impl Iterator<Item = Node> + 'a {
+        self.raw.as_chunks::<{ Node::SIZE }>().0.iter().map(|c| {
+            let (length, null_count) = c.split_at(8);
+            Node {
+                length: u64::from_le_bytes(length.try_into().unwrap_or([0; 8])),
+                null_count: u64::from_le_bytes(null_count.try_into().unwrap_or([0; 8])),
+            }
+        })
+    }
+
+    /// The encoded form.
+    #[must_use]
+    pub const fn as_bytes(self) -> &'a [u8] {
+        self.raw
+    }
+}
+
+/// A list of [`BufferRef`]s, still in its encoded form.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Buffers<'a> {
+    raw: &'a [u8],
+}
+
+impl<'a> Buffers<'a> {
+    /// No buffers at all.
+    pub const EMPTY: Self = Self { raw: &[] };
+
+    /// Wraps the encoded form.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Malformed`] if the length is not a whole number of buffer references.
+    pub fn from_bytes(raw: &'a [u8]) -> Result<Self> {
+        if !raw.len().is_multiple_of(BufferRef::SIZE) {
+            return Err(Error::Malformed(
+                "a buffer list must be a whole number of sixteen byte references",
+            ));
+        }
+        Ok(Self { raw })
+    }
+
+    /// How many buffers are described.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.raw.len() / BufferRef::SIZE
+    }
+
+    /// Whether no buffers are described.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.raw.is_empty()
+    }
+
+    /// The buffer references, in order.
+    pub fn iter(self) -> impl Iterator<Item = BufferRef> + 'a {
+        self.raw
+            .as_chunks::<{ BufferRef::SIZE }>()
+            .0
+            .iter()
+            .map(|c| {
+                let (offset, len) = c.split_at(8);
+                BufferRef {
+                    offset: u64::from_le_bytes(offset.try_into().unwrap_or([0; 8])),
+                    len: u64::from_le_bytes(len.try_into().unwrap_or([0; 8])),
+                }
+            })
+    }
+
+    /// The encoded form.
+    #[must_use]
+    pub const fn as_bytes(self) -> &'a [u8] {
+        self.raw
+    }
+}
+
+/// The decoder handing back one batch of decoded rows.
+///
+/// A batch says how many rows it has and then describes the Arrow arrays behind them as a flat list
+/// of nodes and a flat list of buffers, both in the pre-order the schema puts its fields in. That is
+/// the same shape Arrow IPC uses, and it is the right one here for the same reason: the host already
+/// has the schema, so the schema decides how many nodes and buffers there should be and the batch
+/// only has to supply them.
+///
+/// Neither list carries a count. The record length bounds both of them, so a batch cannot claim a
+/// million columns without being large enough to describe a million columns. That is the same rule
+/// the container format follows, and it is the difference between allocation safety being structural
+/// and allocation safety being something a reviewer has to remember.
+///
+/// The buffers are not in this record. They are in the decoder's memory, and the offsets say where.
+/// Whether those offsets are inside the decoder's memory, and whether the bytes at them are a valid
+/// Arrow array, are two separate questions and neither of them is answered here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Batch<'a> {
+    /// How many rows the batch has.
+    pub rows: u64,
+    /// Flags, all currently reserved and required to be zero.
+    pub flags: u64,
+    /// One node per array, in schema pre-order.
+    pub nodes: Nodes<'a>,
+    /// One reference per Arrow buffer, in schema pre-order.
+    pub buffers: Buffers<'a>,
+}
+
+impl<'a> Batch<'a> {
+    /// The layout version of this record.
+    pub const VERSION: u16 = 1;
+
+    /// An empty batch, which is how a decoder says a scan produced no more rows.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            rows: 0,
+            flags: 0,
+            nodes: Nodes::EMPTY,
+            buffers: Buffers::EMPTY,
+        }
+    }
+
+    /// Writes the record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BufferFull`] if the buffer runs out.
+    pub fn encode(&self, w: &mut Writer<'_>) -> Result<()> {
+        w.record(Tag::BATCH, Self::VERSION, |w| {
+            w.u64(self.rows)?;
+            w.u64(self.flags)?;
+            w.var_bytes(self.nodes.as_bytes())?;
+            w.var_bytes(self.buffers.as_bytes())
+        })
+    }
+
+    /// Reads the record from its payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedVersion`] if the layout version is not one this build knows,
+    /// [`Error::Truncated`] if the payload ends early, or [`Error::Malformed`] if either list is not
+    /// a whole number of entries.
+    pub fn decode(version: u16, p: &mut Reader<'a>) -> Result<Self> {
+        expect_version(Tag::BATCH, version)?;
+        let rows = p.u64()?;
+        let flags = p.u64()?;
+        let nodes = Nodes::from_bytes(p.var_bytes()?)?;
+        let buffers = Buffers::from_bytes(p.var_bytes()?)?;
+        Ok(Self {
+            rows,
+            flags,
+            nodes,
+            buffers,
+        })
+    }
+}
+
 /// One record, decoded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
@@ -434,6 +678,8 @@ pub enum Message<'a> {
     ScanRequest(ScanRequest<'a>),
     /// See [`RangeRequest`].
     RangeRequest(RangeRequest),
+    /// See [`Batch`].
+    Batch(Batch<'a>),
     /// A record this build has no code for. It has already been stepped over, so a reader that gets
     /// one of these can carry on to the next record.
     Unknown(
@@ -462,6 +708,7 @@ impl<'a> Reader<'a> {
             Tag::REFUSAL => Message::Refusal(Refusal::decode(v, &mut p)?),
             Tag::SCAN_REQUEST => Message::ScanRequest(ScanRequest::decode(v, &mut p)?),
             Tag::RANGE_REQUEST => Message::RangeRequest(RangeRequest::decode(v, &mut p)?),
+            Tag::BATCH => Message::Batch(Batch::decode(v, &mut p)?),
             _ => Message::Unknown(header),
         })
     }
@@ -478,6 +725,7 @@ fn expect_version(tag: Tag, version: u16) -> Result<()> {
         Tag::REFUSAL => Refusal::VERSION,
         Tag::SCAN_REQUEST => ScanRequest::VERSION,
         Tag::RANGE_REQUEST => RangeRequest::VERSION,
+        Tag::BATCH => Batch::VERSION,
         _ => return Err(Error::Malformed("no version is defined for this tag")),
     };
     if version == known {

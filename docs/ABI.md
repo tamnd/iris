@@ -74,7 +74,9 @@ The reasons are missing capability, ABI version too new, ABI version too old, un
 
 ## The records
 
-`Hello` is the host introducing itself. It carries the ABI major and minor version, how many bytes of the source the host is willing to keep visible at once, the largest row count it will ask for in one scan, and the capabilities it offers. A window size of zero means the host will map the whole source and the decoder never has to think about windows.
+`Hello` is the host introducing itself. It carries the ABI major and minor version, how many bytes of the source the host is willing to keep visible at once, the largest row count it will ask for in one scan, the capabilities it offers, and how many bytes the source has in total. A window size of zero means the host will map the whole source and the decoder never has to think about windows. A source size of zero means the host is not saying, which is allowed because a decoder that reads forwards from the start does not need to know and only a decoder that has to find its own footer does.
+
+The source size is the first field that was appended to a record after the ABI shipped, so it is also the first real exercise of the grow-at-the-end rule rather than a test of it. A host built before the field existed writes a `Hello` that stops after the capability set, and a decoder built after it reads zero and carries on. The reader that makes this work is `Reader::opt_u64`, which returns nothing when the payload has already ended and an error when there are some bytes left but fewer than eight. Those two situations look similar and are not: the first is an older writer and the second is a record that was cut in half, and reading a short value as a default is how a corrupt record turns into a wrong answer instead of an error.
 
 `HelloAck` is the decoder answering. It carries the ABI version it was built against, the capabilities it requires, the capabilities it would like, and a name for itself that nothing interprets.
 
@@ -86,11 +88,47 @@ The projection on a scan request is a list of 32-bit column indices, not a bitma
 
 `RangeRequest` is the decoder asking for bytes of the source it has not been given. This is the record the whole design turns on. The decoder says which bytes it needs and the host decides how to get them, which keeps file handles, caching, prefetch, object store credentials and retry policy on the host side of the boundary where they can be fixed without recompiling anybody's decoder.
 
+`Batch` is the decoder handing back one batch of decoded rows, and it is described in the next section.
+
 Tags from `0xFF00` up are reserved for private extensions and will never be assigned a meaning by us, so anybody can use them for their own records without worrying about a future version of iris colliding with them.
 
-## What is not decided yet
+## The scan response
 
-The scan response, which is how decoded data comes back, is not in this document because it belongs with the Arrow layout work in M1 and M2 rather than with the framing.
+A batch says how many rows it has and then describes the Arrow arrays behind them as a flat list of nodes and a flat list of buffers, both in the pre-order the schema puts its fields in.
+
+| Field | Width | Meaning |
+| --- | --- | --- |
+| `rows` | `u64` | How many rows this batch holds |
+| `flags` | `u64` | Reserved, zero today |
+| `nodes` | variable | Sixteen bytes per array: a length and a null count |
+| `buffers` | variable | Sixteen bytes per buffer: an offset in guest memory and a length |
+
+This is the shape Arrow IPC uses, and it is the right one here for the same reason. The host already has the schema, so the schema decides how many nodes and how many buffers there should be, and the batch only has to supply them. A batch that disagrees with the schema is a decoder bug the host can catch by counting, which is a much better failure than a batch that carries its own idea of the shape and is believed.
+
+Neither list carries a count. The length in the record header bounds both of them, so a batch cannot claim a million columns without being large enough to describe a million columns. That is the same rule the container format follows and it is the difference between allocation safety being structural and allocation safety being something a reviewer has to remember. A list whose byte length is not a whole number of entries is malformed rather than rounded down.
+
+The buffers are not in the record. They are in the decoder's memory and the offsets say where. Whether those offsets are inside the decoder's memory, and whether the bytes at them are a valid Arrow array, are two separate questions and the record answers neither of them. The host has to check both, and it is in a position to, because it owns the memory the guest is running in.
+
+Batches do not come back the way a `HelloAck` does. A scan that produces a thousand batches should not have to hold a thousand batches, so each one goes out through a host import as it is produced, and the answer to the scan call itself is empty when the scan finished and a `Refusal` when it did not. A host that gets nothing back knows every batch it was going to get has already arrived.
+
+## What a decoder module exports
+
+The ABI is records, and this is the small amount of WebAssembly around them. The guest SDK generates it, so a decoder author never writes any of it, but a host implementer has to know it and it would ossify along with everything else here.
+
+| Export | What it does |
+| --- | --- |
+| `iris_source(len: u32) -> u32` | Makes room for the source and says where to write it |
+| `iris_input(len: u32) -> u32` | Makes room for one record and says where to write it |
+| `iris_start() -> u64` | Reads the `Hello` in the input buffer and answers it |
+| `iris_scan() -> u64` | Reads the `ScanRequest` in the input buffer and runs it |
+
+There is one import, `iris.emit(ptr: u32, len: u32) -> u32`, which is how a batch record leaves the guest.
+
+The two calls that return a `u64` return an answer packed as an address in the high half and a length in the low half, with zero meaning no answer at all. That is a packed return rather than an out pointer because a wasm function can return a `u64` and cannot return two `u32` values, and because writing the answer through a pointer the host supplied would put the guest in the business of following host addresses, which is exactly what the next paragraph is about.
+
+The host never hands the guest an address and the guest never follows one. The host asks the guest for a buffer, the guest allocates it and says where it is, and the host writes into it. That costs a copy of the source and buys a boundary where the failure mode of a host that lies is a wrong answer rather than a corrupt guest. It is the right trade while the source is resident and copied once. It stops being the right trade at M4, where a window slides many times over a source too large to copy, and at that point `require-range` starts being used and this table grows. Decoders do not change, because a decoder never sees any of this.
+
+## What is not decided yet
 
 The filter on a scan request is opaque bytes today. Deciding what goes in there is a real design problem and it is not worth doing before there is a decoder that would use it.
 
