@@ -26,10 +26,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check all
 
@@ -38,10 +38,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+      - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
       - run: cargo audit --deny warnings
@@ -55,10 +55,10 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+      - uses: actions/dependency-review-action@v5
         with:
           comment-summary-in-pr: on-failure
           fail-on-severity: moderate
@@ -88,17 +88,24 @@ jobs:
       matrix:
         language: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && fromJSON('["actions"]') || fromJSON('["actions", "rust"]') }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+      - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
-      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+      - uses: github/codeql-action/analyze@v4
         with:
           category: /language:${{ matrix.language }}
 
+  # Actions here are pinned to a major version tag rather than to a commit hash, and Scorecard's
+  # pinned dependencies check marks that down. The tradeoff is deliberate. A tag means a fix in an
+  # action reaches this repository the day it ships. A hash means it reaches it whenever somebody
+  # gets around to merging the dependabot pull request, and in the meantime the workflow is pinned
+  # to a version that is known to be worse. Every action used here comes from GitHub, from OpenSSF,
+  # or from a Rust tooling maintainer whose toolchain we already run, and a major tag on those does
+  # not move without a release behind it.
   scorecard:
     name: OpenSSF Scorecard
     if: github.event_name == 'push' || github.event_name == 'schedule'
@@ -109,19 +116,19 @@ jobs:
       security-events: write
       id-token: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+      - uses: ossf/scorecard-action@v2
         with:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@v7
         with:
           name: scorecard-results
           path: results.sarif
           retention-days: 5
-      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+      - uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: results.sarif
