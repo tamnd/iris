@@ -1,0 +1,73 @@
+name: Publish
+
+# Publishing is separate from the release workflow on purpose. A release builds binaries and can be
+# rerun as often as anybody likes. A publish is permanent: crates.io does not let a version be taken
+# back, only yanked, so this one is triggered by hand and does a dry run first.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to publish, without the leading v
+        required: true
+        type: string
+      dry_run:
+        description: Resolve and package every crate without uploading anything
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-24.04
+    # The first publish of this workspace has to wait out the crates.io limit on new names, which is
+    # roughly ten minutes each once the initial burst is used up. Every publish after it is quick.
+    timeout-minutes: 180
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: publish
+
+      # A version that does not match the tree is the one mistake this workflow cannot undo, so it
+      # is checked before anything is uploaded rather than discovered halfway through.
+      - name: The version has to match the workspace
+        run: |
+          set -euo pipefail
+          declared=$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "$declared" != "${{ inputs.version }}" ]; then
+            echo "the workspace is at $declared and this run asked for ${{ inputs.version }}"
+            exit 1
+          fi
+          echo "publishing $declared"
+
+      - name: Everything has to build and test first
+        run: |
+          cargo build --workspace --all-targets --locked
+          cargo test --workspace --locked
+
+      - name: Dry run
+        run: ci/publish.sh "${{ inputs.version }}" --dry-run
+
+      - name: Publish
+        if: ${{ !inputs.dry_run }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: ci/publish.sh "${{ inputs.version }}"

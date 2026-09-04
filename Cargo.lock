@@ -782,11 +782,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "iris-abi"
-version = "0.1.0"
-
-[[package]]
-name = "iris-cli"
+name = "iris"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -796,6 +792,10 @@ dependencies = [
  "iris-source",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "iris-abi"
+version = "0.1.0"
 
 [[package]]
 name = "iris-decoder"
