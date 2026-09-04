@@ -26,6 +26,23 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # The promises a compiler cannot keep. A nightly toolchain creeping into a workflow, a patched
+  # dependency arriving in a manifest and a hostname landing in a document all make the build work
+  # rather than break it, which is exactly why each of them needs something that fails on it.
+  #
+  # No toolchain and no cache, because it reads files. It finishes in a couple of seconds and it is
+  # first in the list so that a run that is going to fail on one of these says so straight away.
+  discipline:
+    name: Discipline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Toolchain, dependencies and machine names
+        run: python3 ci/discipline.py
+
   lint:
     name: Format and lint
     runs-on: ubuntu-24.04
@@ -226,7 +243,7 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [lint, test, wasm, no-std, features, msrv, docs, miri, coverage]
+    needs: [discipline, lint, test, wasm, no-std, features, msrv, docs, miri, coverage]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -23,9 +23,12 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo doc --workspace --no-deps
+python3 ci/discipline.py
 ```
 
-The toolchain is pinned in `rust-toolchain.toml` to Rust 1.98, which is also the minimum supported version. Raising it is a deliberate change, not something that happens because a dependency wanted it.
+That last one is the checks a compiler cannot do. A nightly toolchain in a workflow, a patched dependency in a manifest and a machine's hostname in a document all make the build work rather than break it, so each of them needs something that fails on it instead. It reads files and takes a second.
+
+The toolchain is pinned in `rust-toolchain.toml` to Rust 1.98, which is also the minimum supported version, and the discipline check enforces that those two numbers are the same one. Raising it is a deliberate change, not something that happens because a dependency wanted it.
 
 Some further expectations, none of them surprising:
 
