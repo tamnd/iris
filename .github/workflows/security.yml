@@ -70,6 +70,11 @@ jobs:
           # cache action is LGPL-3.0 and that is fine where it sits.
           allow-dependencies-licenses: pkg:githubactions/Swatinem/rust-cache
 
+  # The actions analysis takes about forty seconds and catches the thing a workflow change is most
+  # likely to get wrong, so it runs on every pull request. The rust analysis takes six minutes,
+  # which was the longest thing standing between a pull request and a merge, and on a tree this size
+  # it has yet to say anything clippy did not. It runs on the default branch and on the nightly
+  # clock instead, so nothing merges without it having been run, it is just not run twice.
   codeql:
     name: CodeQL
     runs-on: ubuntu-24.04
@@ -81,7 +86,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [actions, rust]
+        language: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && fromJSON('["actions"]') || fromJSON('["actions", "rust"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
