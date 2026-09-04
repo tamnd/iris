@@ -33,7 +33,7 @@ fn every_unsound_case_is_refused_under_the_rule_it_breaks() {
         );
     }
 
-    assert!(checked >= 7, "the corpus has shrunk to {checked} cases");
+    assert!(checked >= 8, "the corpus has shrunk to {checked} cases");
 }
 
 #[test]

@@ -23,6 +23,9 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Half an hour a target a night, which is a smoke test rather than the gate. The day long run is
+  # in the soak workflow, on a machine that is allowed to spend a day on it, and both jobs share one
+  # corpus cache so the short run starts from what the long one found.
   fuzz:
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-24.04

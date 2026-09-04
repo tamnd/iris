@@ -1,0 +1,8 @@
+# actionlint knows the labels GitHub's own runners carry and cannot know the ones ours do, so a
+# workflow that names one of ours reads as a typo. This is the list of machines, named the way the
+# fleet names them: what the chip is and how much of it there is.
+self-hosted-runner:
+  labels:
+    - epyc-6c-12gb
+    - epyc-8c-24gb
+    - i9-13900k-64gb

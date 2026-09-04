@@ -102,6 +102,7 @@ pub fn cases() -> Vec<Case> {
         dictionary_index_equal_to_the_dictionary_length(),
         view_buffer_index_equal_to_the_buffer_count(),
         length_times_width_that_overflows(),
+        length_that_wraps_the_count_of_offsets(),
         child_one_row_short_of_its_parent(),
         schema_nesting_without_a_bound(),
     ]
@@ -275,6 +276,26 @@ fn length_times_width_that_overflows() -> Case {
                 null_count: 0,
             }],
             buffers: vec![Vec::new(), i64s(&[1])],
+        },
+    }
+}
+
+fn length_that_wraps_the_count_of_offsets() -> Case {
+    Case {
+        name: "a length that wraps the count of offsets",
+        why: "found by the fuzzer rather than by anybody thinking about it. There is one more \
+              offset than there are slots, and adding that one to the largest length there is \
+              wrapped the count to zero, so the buffer needed no bytes and the loop over the \
+              offsets ran no times. The array came back sound with nothing in it",
+        expected: Some(Invariant::Size),
+        subject: Subject::Batch {
+            schema: Schema::new(vec![Field::new("s", DataType::Utf8, false)]),
+            rows: u64::MAX,
+            nodes: vec![Node {
+                length: u64::MAX,
+                null_count: 0,
+            }],
+            buffers: vec![Vec::new(), Vec::new(), Vec::new()],
         },
     }
 }

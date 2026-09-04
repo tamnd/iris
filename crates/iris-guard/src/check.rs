@@ -431,7 +431,17 @@ fn check_offsets(offsets: &[u8], len: u64, width: u64, path: &str) -> Result<u64
         return Ok(0);
     }
 
-    let entries = len + 1;
+    // There is one more offset than there are slots, and that plus one is a real arithmetic
+    // operation rather than a formality. A length of `u64::MAX` wraps it to zero, which in a
+    // release build means no entries to check, no bytes needed, and an array of the largest length
+    // there is being accepted with an empty offsets buffer. The fuzzer found this one.
+    let entries = len.checked_add(1).ok_or_else(|| {
+        Violation::at(
+            Invariant::Size,
+            path,
+            format!("{len} slots need one more offset than that, which does not fit in a count"),
+        )
+    })?;
     let needed = entries.checked_mul(width).ok_or_else(|| {
         Violation::at(
             Invariant::Size,
@@ -601,6 +611,23 @@ mod tests {
         let err = check(&schema, u64::MAX, &[node(u64::MAX, 0)], &buffers)
             .expect_err("that many slots is not addressable");
         assert_eq!(err.invariant, Invariant::Size);
+    }
+
+    /// The fuzzer found this one, on the second batch it generated with a corrupted length.
+    ///
+    /// A column of `u64::MAX` slots wrapped the count of offsets to zero, so the buffer needed no
+    /// bytes, the loop over the offsets ran no times, and the largest array there is came back
+    /// sound with an empty offsets buffer. It panicked in a debug build and was silent in a release
+    /// one, which is the wrong way round for a check.
+    #[test]
+    fn a_length_that_wraps_the_count_of_offsets_is_caught() {
+        for data_type in [DataType::Binary, DataType::LargeBinary] {
+            let schema = Schema::new(vec![Field::new("a", data_type, false)]);
+            let buffers = vec![Vec::new(), Vec::new(), Vec::new()];
+            let err = check(&schema, u64::MAX, &[node(u64::MAX, 0)], &buffers)
+                .expect_err("one more offset than that does not fit in a count");
+            assert_eq!(err.invariant, Invariant::Size);
+        }
     }
 
     #[test]
