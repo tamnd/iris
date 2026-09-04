@@ -89,13 +89,18 @@ jobs:
           key: fuzz-corpus-${{ inputs.target || 'fuzz_guard' }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ inputs.target || 'fuzz_guard' }}-
 
+      # The target is named rather than left to cargo-fuzz, which defaults to the triple it was
+      # itself built for. The binary that gets installed here is the portable Linux one, which is
+      # built for musl, and a sanitizer cannot be linked into a static binary. So the default is a
+      # build failure on a machine where everything is fine.
       - name: Run
         env:
           FUZZ_TARGET: ${{ inputs.target || 'fuzz_guard' }}
           FUZZ_SECONDS: ${{ inputs.seconds || '86400' }}
         run: |
           set -euo pipefail
-          cargo +nightly fuzz run "$FUZZ_TARGET" -- \
+          cargo +nightly fuzz run --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
+            "$FUZZ_TARGET" -- \
             -max_total_time="$FUZZ_SECONDS" \
             -rss_limit_mb=4096 \
             -print_final_stats=1
@@ -111,11 +116,18 @@ jobs:
       # A corpus grows all day and most of what it grows is inputs that reach the same code as an
       # input already in it. Minimising before the cache is written keeps the thing the nightly run
       # downloads small enough to be worth downloading.
+      #
+      # It does not decide whether the run passed, which is why it is allowed to fail on its own. A
+      # red soak has to mean the fuzzer found something.
       - name: Minimise the corpus
         if: always()
+        continue-on-error: true
         env:
           FUZZ_TARGET: ${{ inputs.target || 'fuzz_guard' }}
-        run: cargo +nightly fuzz cmin "$FUZZ_TARGET"
+        run: |
+          set -euo pipefail
+          cargo +nightly fuzz cmin --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
+            "$FUZZ_TARGET"
 
       # The gate is a claim about how long this ran, so the run says how long it ran.
       - name: Say what happened
@@ -126,7 +138,7 @@ jobs:
           OUTCOME: ${{ job.status }}
         run: |
           set -euo pipefail
-          corpus=$(find "fuzz/corpus/$FUZZ_TARGET" -type f 2>/dev/null | wc -l | tr -d ' ')
+          corpus=$(find "fuzz/corpus/$FUZZ_TARGET" -type f 2>/dev/null | wc -l | tr -d ' ' || true)
           {
             echo "## Soak"
             echo
