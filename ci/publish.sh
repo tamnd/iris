@@ -90,6 +90,26 @@ if [ -n "$DRY_RUN" ]; then
   exit 0
 fi
 
+# The token is checked before anything is uploaded, because the way this fails otherwise is bad out
+# of proportion to the mistake. cargo does not find out the token is wrong until it has packaged,
+# verified and uploaded a crate, and the retry in the loop below then waits ten minutes and does the
+# whole thing again before giving up. One request here turns a twenty minute failure into a one
+# second one. Nothing prints the token, only what crates.io thought of it.
+if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+  echo "CARGO_REGISTRY_TOKEN is not set, so there is nothing to publish with" >&2
+  exit 1
+fi
+me="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --header "User-Agent: iris release (https://github.com/tamnd/iris)" \
+  --header "Authorization: $CARGO_REGISTRY_TOKEN" \
+  "https://crates.io/api/v1/me")"
+if [ "$me" != "200" ]; then
+  echo "crates.io answered $me when asked who this token belongs to, so it is not a token it will" >&2
+  echo "accept. A token set from a shell file with the quotes still around it is the usual cause." >&2
+  exit 1
+fi
+echo "== the token is one crates.io recognises"
+
 new_names=0
 for crate in "${CRATES[@]}"; do
   state="$(state_of "$crate")"

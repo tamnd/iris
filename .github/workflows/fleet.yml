@@ -62,7 +62,7 @@ jobs:
             runner: [self-hosted, windows, x64, i9-13900k-64gb]
             jobs: 16
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -135,7 +135,7 @@ jobs:
           - name: i9-13900k-64gb
             runner: [self-hosted, windows, x64, i9-13900k-64gb]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -152,7 +152,7 @@ jobs:
         shell: pwsh
         run: Get-Content probe-${{ matrix.name }}.json
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@v7
         with:
           name: probe-${{ matrix.name }}
           path: probe-${{ matrix.name }}.json
