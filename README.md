@@ -51,11 +51,9 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Decoders are built for `wasm32-unknown-unknown`:
+Decoders are built for `wasm32-unknown-unknown`, which the toolchain file already adds.
 
-```
-rustup target add wasm32-unknown-unknown
-```
+Platform by platform instructions, including Windows and the exact set of checks CI runs, are in [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md).
 
 ## Roadmap
 
