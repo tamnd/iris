@@ -15,13 +15,17 @@ The version lives in one place, `[workspace.package]` in the root `Cargo.toml`, 
 3. Tag the merge commit and push the tag. The `Release` workflow builds binaries for five targets, checksums them, attests their provenance and opens a draft release.
 4. Edit the draft, then publish it.
 
-The tag points at the release commit rather than at whatever is on the default branch when you get around to it. That matters when work for the next milestone has already started landing, which it usually has.
+The tag points at the release commit rather than at whatever is on the default branch when you get around to it. That matters when work for the next milestone has already started landing, which it usually has, and it is what the `Publish` workflow checks out, so the tag is the release rather than a label on it.
 
 ## Publishing to crates.io
 
 crates.io starts at `0.2.0` rather than at `0.1.0`, and that is deliberate. `v0.1.0` was tagged at the tree where M0 finished, before any of the publishing machinery existed, and by the time it did exist the command line package had been renamed because `iris-cli` belongs to somebody else. Publishing `0.1.0` from a tree that is not the one the tag points at would make the tag a lie for the sake of a round number. `v0.1.1` was tagged while M1 was still in progress and the first publish of it never got past the limit on new names, so rather than spend an hour creating ten names for a tree nobody would install, the first version on crates.io is the one where M1 finished.
 
 The gap is not a problem to fix later. A version that exists as a tag and not on crates.io is readable from the tag list, while a version published from the wrong tree is not readable from anywhere.
+
+`0.2.0` on crates.io is a broken half of a release and `0.2.1` is the first version that is all one tree. What went wrong is worth writing down, because the shape of it is not obvious. The workflow used to check out the default branch, and publishing ten crates against the name limit takes long enough that the branch moves underneath a run. The first attempt got as far as `iris-guard` and stopped. Work merged. The rerun skipped `iris-guard`, because it was already published at that version, and carried on with the rest from a much newer tree. So `iris-guard 0.2.0` is the stub that was there ten minutes before the commit that implemented it, `iris-runtime 0.2.0` could not build against it, and `iris-runtime` and `iris` never went out at all.
+
+Nothing about that is recoverable in place, because a version on crates.io is permanent. The workflow now checks out `v<version>` rather than a branch, so a version is one tree whether or not the run is quick, and the fix for the release itself was the next patch.
 
 The `Publish` workflow is manual, takes the version as an input, and defaults to a dry run. Run it as a dry run first. It checks that the version matches the tree, builds, tests, and then packages every crate without uploading anything.
 
