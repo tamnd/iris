@@ -46,24 +46,36 @@ NEW_CRATE_BURST="${NEW_CRATE_BURST:-4}"
 # to be long enough for the index to catch up, which cargo already waits for, so it is short.
 EXISTING_CRATE_DELAY="${EXISTING_CRATE_DELAY:-20}"
 
-api() {
-  curl --silent --show-error --location \
-    --header "User-Agent: iris release (https://github.com/tamnd/iris)" \
-    "https://crates.io/api/v1/crates/$1"
-}
-
+# crates.io wants a user agent that says who is calling and answers 403 to anything that does not
+# send one, curl's default included. That matters more than it looks: a 403 body is neither the
+# crate nor an error about the crate, so a check that only looks at the body reads it as a name that
+# exists, and the whole point of this script is telling those two apart.
+#
 # Three answers: "missing" for a name nobody has taken, "stale" for a name that exists without this
-# version, and "done" for a name that already has it.
+# version, and "done" for a name that already has it. Anything else stops the release, because
+# guessing here is how a first publish walks into the rate limit at full speed.
 state_of() {
-  local body
-  body="$(api "$1")"
-  if printf '%s' "$body" | grep -q '"errors"'; then
-    echo "missing"
-  elif printf '%s' "$body" | grep -q "\"num\":\"$VERSION\""; then
-    echo "done"
-  else
-    echo "stale"
-  fi
+  local response status body
+  response="$(curl --silent --show-error --location --write-out '\n%{http_code}' \
+    --header "User-Agent: iris release (https://github.com/tamnd/iris)" \
+    "https://crates.io/api/v1/crates/$1")"
+  status="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+
+  case "$status" in
+    404) echo "missing" ;;
+    200)
+      if printf '%s' "$body" | grep -q "\"num\":\"$VERSION\""; then
+        echo "done"
+      else
+        echo "stale"
+      fi
+      ;;
+    *)
+      echo "crates.io answered $status for $1, which is neither yes nor no" >&2
+      return 1
+      ;;
+  esac
 }
 
 # A dry run is one command rather than ten, because `cargo publish --dry-run` on a single crate
