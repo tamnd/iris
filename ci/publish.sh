@@ -5,11 +5,12 @@
 # and it is written down here rather than derived because a wrong answer is a half published release
 # that somebody has to clean up by hand.
 #
-# The delays matter more. crates.io limits new crate names much harder than new versions of an
+# The waiting matters more. crates.io limits new crate names much harder than new versions of an
 # existing crate, so the first release of this workspace is the slow one and every release after it
-# is quick. The script tells the two apart by asking crates.io whether the name exists, and it skips
-# anything that is already published at this version so that a rerun after a failure picks up where
-# it stopped instead of starting again.
+# is quick. When it throttles a publish it says in the response exactly when the next name is due, so
+# this script reads that and sleeps until then rather than guessing. It also skips anything already
+# published at this version, so a rerun after a failure picks up where it stopped instead of starting
+# again.
 #
 # Usage: ci/publish.sh <version> [--dry-run]
 set -euo pipefail
@@ -32,15 +33,18 @@ CRATES=(
   iris
 )
 
-# How long to wait after publishing a name that did not exist before, once the burst is used up.
-# crates.io lets a handful of new names through at once and then throttles to roughly one every ten
-# minutes, and being throttled halfway through a workspace is much more annoying than being slow.
-NEW_CRATE_DELAY="${NEW_CRATE_DELAY:-620}"
+# How long to wait before retrying when crates.io throttled us and did not say when to come back.
+# Its limit on new names is roughly one every ten minutes, so ten minutes and a bit is the guess.
+RETRY_DELAY="${RETRY_DELAY:-620}"
 
-# How many new names go through before the throttle starts. Set one below what crates.io documents,
-# because being wrong in this direction costs ten minutes and being wrong in the other direction
-# costs a failed release.
-NEW_CRATE_BURST="${NEW_CRATE_BURST:-4}"
+# On top of whatever time crates.io names, because its clock is not this machine's clock and coming
+# back one second early costs another full interval.
+RETRY_MARGIN="${RETRY_MARGIN:-60}"
+
+# The longest this script will keep waiting on a single crate before giving up on the whole release.
+# Giving up is not expensive: the loop below skips anything already published, so a rerun picks up
+# where this one stopped.
+MAX_WAIT_PER_CRATE="${MAX_WAIT_PER_CRATE:-2400}"
 
 # How long to wait after publishing a new version of a crate that already exists. This one only has
 # to be long enough for the index to catch up, which cargo already waits for, so it is short.
@@ -76,6 +80,70 @@ state_of() {
       return 1
       ;;
   esac
+}
+
+# Seconds from now until a date crates.io named, or nothing if the date cannot be read. GNU date and
+# BSD date want to be asked in completely different ways, so both are tried and the caller falls back
+# to a fixed wait if neither works.
+seconds_until() {
+  local when="$1" epoch now
+  epoch="$(date -u -d "$when" +%s 2>/dev/null || true)"
+  if [ -z "$epoch" ]; then
+    epoch="$(date -u -j -f '%a, %d %b %Y %H:%M:%S %Z' "$when" +%s 2>/dev/null || true)"
+  fi
+  [ -n "$epoch" ] || return 1
+  now="$(date -u +%s)"
+  echo $((epoch - now))
+}
+
+# Publishes one crate, waiting out the rate limit for as long as crates.io asks.
+#
+# The limit on new names is the whole difficulty of a first release. crates.io lets a small number of
+# new names through and then hands out roughly one every ten minutes, and it says in the 429 exactly
+# when the next one is due. Reading that is better than guessing at it: a guess that is too short
+# burns an attempt and a guess that is too long adds up over ten crates.
+#
+# Anything that is not a 429 gets one retry and then stops the release. Those failures are index lag,
+# which one wait fixes, or a real problem, which no amount of waiting fixes.
+publish_crate() {
+  local crate="$1" log waited=0 wait until
+  log="$(mktemp)"
+  trap 'rm -f "$log"' RETURN
+
+  while :; do
+    if cargo publish --locked -p "$crate" 2>&1 | tee "$log"; then
+      return 0
+    fi
+
+    if ! grep -q '429 Too Many Requests' "$log"; then
+      echo "-- $crate did not publish and it was not the rate limit, waiting $RETRY_DELAY seconds" \
+        "and trying once more"
+      sleep "$RETRY_DELAY"
+      cargo publish --locked -p "$crate"
+      return 0
+    fi
+
+    until="$(sed -n 's/.*Please try again after \(.*\) and see.*/\1/p' "$log" | head -n 1)"
+    wait=""
+    if [ -n "$until" ]; then
+      wait="$(seconds_until "$until" || true)"
+    fi
+    if [ -z "$wait" ] || [ "$wait" -lt 1 ]; then
+      wait="$RETRY_DELAY"
+    fi
+    wait=$((wait + RETRY_MARGIN))
+
+    waited=$((waited + wait))
+    if [ "$waited" -gt "$MAX_WAIT_PER_CRATE" ]; then
+      echo "$crate has been rate limited for longer than $MAX_WAIT_PER_CRATE seconds, so this run" >&2
+      echo "stops here. Everything published so far stays published and rerunning this workflow" >&2
+      echo "picks up at $crate rather than starting again." >&2
+      return 1
+    fi
+
+    echo "-- crates.io is throttling new names, next attempt at $crate in $wait seconds"
+    sleep "$wait"
+  done
 }
 
 # A dry run is one command rather than ten, because `cargo publish --dry-run` on a single crate
@@ -114,7 +182,6 @@ if [[ ! $CARGO_REGISTRY_TOKEN =~ ^[A-Za-z0-9]{20,}$ ]]; then
 fi
 echo "== the token is shaped like a crates.io token"
 
-new_names=0
 for crate in "${CRATES[@]}"; do
   state="$(state_of "$crate")"
   case "$state" in
@@ -126,23 +193,7 @@ for crate in "${CRATES[@]}"; do
     stale) echo "== $crate exists, publishing $VERSION" ;;
   esac
 
-  # A single retry, because the failure this guards against is a rate limit or an index that has not
-  # caught up, and both of those are fixed by waiting. Anything that fails twice is a real problem
-  # and should stop the release rather than be retried into a worse state.
-  if ! cargo publish --locked -p "$crate"; then
-    echo "-- $crate did not publish, waiting $NEW_CRATE_DELAY seconds and trying once more"
-    sleep "$NEW_CRATE_DELAY"
-    cargo publish --locked -p "$crate"
-  fi
-
-  if [ "$state" = missing ]; then
-    new_names=$((new_names + 1))
-    if [ "$new_names" -ge "$NEW_CRATE_BURST" ]; then
-      echo "-- the burst is used up, waiting $NEW_CRATE_DELAY seconds before the next new name"
-      sleep "$NEW_CRATE_DELAY"
-      continue
-    fi
-  fi
+  publish_crate "$crate"
   sleep "$EXISTING_CRATE_DELAY"
 done
 
