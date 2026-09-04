@@ -12,8 +12,11 @@ keywords.workspace = true
 categories.workspace = true
 readme.workspace = true
 
+# Deliberately empty. iris-abi is compiled into every decoder, including decoders
+# written by people who are not us in toolchains that are not Rust, so it has to be
+# the smallest possible thing. `cargo tree -p iris-abi` showing nothing is a gate,
+# not an accident. See the no_std job in CI.
 [dependencies]
-thiserror.workspace = true
 
 [lints]
 workspace = true

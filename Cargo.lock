@@ -784,9 +784,6 @@ dependencies = [
 [[package]]
 name = "iris-abi"
 version = "0.0.0"
-dependencies = [
- "thiserror",
-]
 
 [[package]]
 name = "iris-cli"
