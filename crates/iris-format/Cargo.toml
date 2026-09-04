@@ -18,5 +18,8 @@ iris-abi.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+blake3.workspace = true
+
 [lints]
 workspace = true
