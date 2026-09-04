@@ -10,8 +10,8 @@
 //! The host sends a [`Hello`] saying which ABI version it speaks and what it can do. The decoder
 //! answers with a [`HelloAck`] saying what it needs. [`negotiate`] compares the two and either
 //! produces an [`Agreement`] or a [`Refusal`] that names the capability that was missing. After
-//! that the host sends [`ScanRequest`] records and the decoder sends [`RangeRequest`] records back
-//! when it needs bytes it has not been given.
+//! that the host sends [`ScanRequest`] records, the decoder sends [`RangeRequest`] records back when
+//! it needs bytes it has not been given, and the rows come back as [`Batch`] records.
 //!
 //! ```
 //! use iris_abi::{Capability, CapabilitySet, Hello, HelloAck, negotiate};
@@ -24,6 +24,7 @@
 //!     offered: CapabilitySet::new()
 //!         .with(Capability::REQUIRE_RANGE)
 //!         .with(Capability::SLIDING_WINDOW),
+//!     source_bytes: 4 << 30,
 //! };
 //! let decoder = HelloAck {
 //!     abi_major: iris_abi::ABI_MAJOR,
@@ -70,7 +71,8 @@ pub use caps::{Capability, CapabilitySet};
 pub use error::{Error, Result};
 pub use handshake::{Agreement, negotiate};
 pub use message::{
-    Hello, HelloAck, Message, Projection, RangeRequest, Refusal, RefusalReason, ScanRequest,
+    Batch, BufferRef, Buffers, Hello, HelloAck, Message, Node, Nodes, Projection, RangeRequest,
+    Refusal, RefusalReason, ScanRequest,
 };
 pub use record::{Header, Tag};
 pub use wire::{Reader, Writer};
@@ -86,4 +88,4 @@ pub const ABI_MAJOR: u16 = 0;
 ///
 /// This goes up when a field or a record or a capability is added. Two sides at different minor
 /// versions can always talk to each other, and they settle on the lower of the two.
-pub const ABI_MINOR: u16 = 1;
+pub const ABI_MINOR: u16 = 2;

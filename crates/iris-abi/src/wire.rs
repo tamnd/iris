@@ -112,6 +112,24 @@ impl<'a> Reader<'a> {
         ]))
     }
 
+    /// Reads a `u64` that a later version of a record appended, if the writer knew about it.
+    ///
+    /// This is the other half of the grow-at-the-end rule. A reader that does not care about a new
+    /// field just stops early and the framing puts it on the next record. A reader that does care
+    /// has to tell two situations apart: a writer that predates the field, which is fine and means
+    /// the field is absent, and a payload that was cut in half, which is not fine. Nothing left is
+    /// the first, something but not enough is the second.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Truncated`] if there is at least one byte left but fewer than eight.
+    pub fn opt_u64(&mut self) -> Result<Option<u64>> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+        self.u64().map(Some)
+    }
+
     /// Reads exactly `n` bytes and borrows them from the input.
     ///
     /// # Errors

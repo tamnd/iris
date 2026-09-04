@@ -78,7 +78,7 @@ jobs:
         with:
           key: wasm32
       - name: Build guest crates for wasm32
-        run: cargo build --locked --target wasm32-unknown-unknown -p iris-abi -p iris-decoder
+        run: cargo build --locked --target wasm32-unknown-unknown -p iris-abi -p iris-decoder --lib --examples
 
   # iris-abi is the surface that ossifies, so it carries the strictest
   # structural constraint in the tree: no dependencies, and no standard library.
