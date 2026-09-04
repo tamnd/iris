@@ -10,6 +10,50 @@ Nothing is built. Two microbenchmarks decide the shape of everything after them:
 
 **Gate.** `require_range` under 100 ns per call, and windowing under 3% on a resident file. If the first fails, the design moves to a shared window descriptor before any code is written. If the second fails, the claim that supporting remote storage does not tax the local path is wrong and this plan needs rewriting.
 
+### The M0 decision
+
+The probe is `crates/iris-vm/examples/m0_probe.rs` and the workflow that runs it on every supported platform is `.github/workflows/m0.yml`. Wasmtime 48.0.1, release profile, medians with 95 percent bootstrap intervals.
+
+The four hosted rows below are shared machines, so the magnitudes are not publishable and are not published. What they are good for is the shape of the answer and whether it changes character on a different architecture, which turns out to be the whole story here. The last row is an Apple M4 laptop with 24 GiB, which is not a shared machine.
+
+**Bet one, the cost of a host call.** The number is the cost of one call, taken as the difference between a loop that calls an imported function and the same loop without the call, with the callee doing the work a real `require_range` has to do.
+
+| Machine | Cost of one host call | Gate |
+| --- | --- | --- |
+| Hosted `ubuntu-24.04-arm` | 3.43 ns | pass |
+| Hosted `ubuntu-24.04` | 4.68 ns | pass |
+| Hosted `macos-latest` | 2.67 ns | pass |
+| Hosted `windows-latest` | 4.02 ns | pass |
+| Apple M4 laptop | 3.41 ns | pass |
+
+The gate was 100 ns and the worst number is 4.68 ns, which is a margin of twenty. The range inversion is affordable and there is no reason to move to a shared window descriptor. That is the first bet settled, in the direction the design assumed, on every platform.
+
+Worth saying plainly, because it is the more interesting half of the result: a Wasmtime host call is not expensive. Most of the intuition that it would be comes from a time when it was.
+
+**Bet two, what the window costs.** Two numbers here. The first is the abstraction, a scan through the windowed control flow with a host call per chunk that does nothing, against a flat scan of the same bytes in the same order. That is the gate, because it isolates the cost of the shape from the cost of moving data. The second is a real refill, where the host copies the next window into guest memory between chunks.
+
+| Machine | Abstraction | Gate | With a real refill |
+| --- | --- | --- | --- |
+| Hosted `ubuntu-24.04-arm` | -3.7% | pass | +53.8% |
+| Hosted `macos-latest` | +2.6% | pass | +50.6% |
+| Apple M4 laptop | +1.5% | pass | +25.5% |
+| Hosted `windows-latest` | +15.7% | fail | +116.0% |
+| Hosted `ubuntu-24.04` | +49.1% | fail | +141.5% |
+
+This is not a pass and it is not a failure. It splits along architecture: the gate passes on every aarch64 machine measured and fails on both x86-64 machines, and on the x86-64 Linux runner it fails by a factor of sixteen rather than by a margin. The confidence intervals on that row do not overlap at all, so whatever it is, it is not sampling noise on the day.
+
+**What is decided.** Bet one is settled and closed. Bet two is not, and the honest thing is to say so rather than to take one of the two branches the plan wrote in advance.
+
+Neither branch is taken yet, for two reasons. The first is that both failing rows are shared hosted machines and the passing rows include the only machine in the table that is not shared, so the split could be architecture or could be neighbours. The second is that the windowed loop in the probe is hand written `wat` that addresses each load as a base plus an index, and a real decoder emitted by a real toolchain does not necessarily produce that shape, so some of the gap may be the probe rather than the design.
+
+**What changes.** Three things, and none of them is moving the gate. The gate was written down before the measurement, which is the only order in which a gate means anything, and a gate that moves when it is inconvenient is not a gate.
+
+1. M4 does not start until the x86-64 result has been reproduced on hardware nobody else is using. That is the two Xeon machines and the Ryzen desktop, through iris-bench, against a registered claim. If it reproduces, the abstraction cost is real and the design has to answer it. If it does not, the hosted rows were noise and M4 proceeds as written. That is issue #65.
+2. The naive refill is already ruled out as an implementation. A host memcpy of the window between chunks costs between a quarter and one and a half times the scan itself, on every machine measured including the ones that pass the abstraction gate. Whatever windowing ships, the bytes do not get copied into guest memory a window at a time. That is a real finding and it is the useful half of the second measurement.
+3. The probe grows a second windowed shape, compiled from Rust rather than written by hand, so that the next run of this measurement separates the cost of the design from the cost of the way the probe expresses it. That is issue #66.
+
+The numbers above go into iris-bench and get attached to claim identifiers once the reproduction machinery in B3 exists. Until then they live here, in the document that has to justify them.
+
 ## M1, the ABI and a decoder that does nothing interesting
 
 `iris-abi`, `iris-format`, `iris-decoder`, and enough of `iris-runtime` to run a decoder over a fully resident buffer. No windowing, no validation, no metering, no threads. The first decoder is deliberately trivial, fixed width integers with no compression, because the target is the contract rather than the decoding.
@@ -64,8 +108,8 @@ Places to stop and reassess rather than push through.
 
 | After | Question | If the answer is bad |
 |---|---|---|
-| M0 | Is a host call affordable? | Redesign to a shared window descriptor before writing code |
-| M0 | Does windowing tax the local path? | The first bet failed. Two code paths forever, or reconsider the inversion |
+| M0 | Is a host call affordable? | Redesign to a shared window descriptor before writing code. **Settled: yes, 2.7 to 4.7 ns against a 100 ns gate** |
+| M0 | Does windowing tax the local path? | The first bet failed. Two code paths forever, or reconsider the inversion. **Open: passes on aarch64, fails on x86-64, being reproduced on hardware that is not shared** |
 | M2 | What does validation cost? | Over 15%, keep it on and make digest pinning the documented normal path. Do not ship it off |
 | M5 | Do declared ranges win on object storage? | The main differentiator is gone and the design notes are wrong |
 | M5 | Is the vectorisation gap architecture neutral? | If yes, M7 drops in priority and the story gets much better |
