@@ -54,10 +54,17 @@ jobs:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
+      # The target is named rather than left to cargo-fuzz, which defaults to the triple it was
+      # itself built for. The binary that gets installed here is the portable Linux one, which is
+      # built for musl, and a sanitizer cannot be linked into a static binary.
       - name: Run
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+          FUZZ_SECONDS: ${{ inputs.fuzz_seconds || '1800' }}
         run: |
-          cargo +nightly fuzz run ${{ matrix.target }} \
-            -- -max_total_time=${{ inputs.fuzz_seconds || '1800' }} -rss_limit_mb=4096
+          set -euo pipefail
+          cargo +nightly fuzz run --target "$(rustc +nightly -vV | sed -n 's/^host: //p')" \
+            "$FUZZ_TARGET" -- -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=4096
       - name: Keep the crash if there was one
         if: failure()
         uses: actions/upload-artifact@v7
