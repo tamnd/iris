@@ -64,6 +64,11 @@ jobs:
           fail-on-severity: moderate
           license-check: true
           allow-licenses: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Zlib, MPL-2.0, CC0-1.0, BSL-1.0
+          # The licence check is about what ends up in the artifacts we publish. A
+          # GitHub Action runs on a build machine and nothing it contains is linked
+          # into anything we ship, so its licence is not the same question. This
+          # cache action is LGPL-3.0 and that is fine where it sits.
+          allow-dependencies-licenses: pkg:githubactions/Swatinem/rust-cache
 
   codeql:
     name: CodeQL
