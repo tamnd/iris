@@ -36,10 +36,17 @@
 //! cannot meet and a host that runs a decoder it cannot serve are different bugs, and finding out
 //! which one happened is worth the second check.
 //!
-//! Every batch is counted against the schema. The schema says how many arrays there are and how
-//! many buffers each one takes, and a batch that hands over a different number runs out or has some
-//! left over. Then Arrow validates the buffers themselves. A decoder cannot produce an array that
-//! is merely plausible.
+//! Every batch goes through `iris-guard` before a single array is built. The guard answers the
+//! bounds questions: whether the batch has the arrays and buffers the schema calls for, whether
+//! every offset is inside the buffer it indexes, whether a child is long enough for the parent that
+//! points into it, and whether a length times a width overflows rather than fits. Then Arrow
+//! validates what it is handed as a second opinion from an implementation nobody here wrote. A
+//! decoder cannot produce an array that is merely plausible.
+//!
+//! The schema is checked once when the container is opened rather than once per batch, which is
+//! also where a schema nested deeper than anything will walk gets refused. That check comes before
+//! the ABI check, because the ABI message describes the schema and formatting a schema you have not
+//! checked is how a refusal becomes a crash.
 //!
 //! # What it does not do yet
 //!
@@ -53,7 +60,9 @@
 //! moment one is not. That is M2 and it is a gate rather than a nice to have.
 //!
 //! Unions, dictionaries, run end encoding and the view types are refused by name rather than
-//! skipped. A column that quietly does not arrive is the worst failure this crate could have.
+//! skipped. A column that quietly does not arrive is the worst failure this crate could have. The
+//! checks the last two of those need are already written in `iris-guard`, so carrying them is a
+//! question about the container format rather than about safety.
 
 #![forbid(unsafe_code)]
 

@@ -1,37 +1,25 @@
 //! Turning a flat list of nodes and buffers into Arrow arrays.
 //!
+//! # What is left here
+//!
+//! Checking is not. Every structural question about a batch, how many arrays the schema calls for,
+//! how many buffers each one takes, whether the offsets are inside the buffers they index, is
+//! answered by `iris-guard` before a single array is built. This module is what happens after the
+//! answer is yes.
+//!
+//! That split is not tidiness. The checks have to happen before anything walks the schema or
+//! allocates against a length, and a module that both checks and builds ends up doing them in
+//! whichever order the building needs.
+//!
 //! # Why the schema drives this and the batch does not
 //!
 //! A batch says how many rows it has and then hands over a flat list of nodes and a flat list of
 //! buffers. It does not say what they are. The schema says what they are, and this walks the schema
-//! in pre-order taking as many nodes and buffers as each field is entitled to. A decoder that hands
-//! over the wrong number of either runs out or has some left over, and both are caught here by
-//! counting rather than by trusting.
+//! in pre-order taking as many nodes and buffers as each field is entitled to.
 //!
 //! That is the same rule Arrow IPC follows, for the same reason: a batch that carries its own idea
 //! of the shape and is believed is a much worse failure than one that disagrees with the schema and
 //! is caught.
-//!
-//! # The buffer table
-//!
-//! How many buffers a field takes is fixed by the Arrow specification, and this is a transcription
-//! of it. Every array starts with a validity buffer, except the two that the specification says do
-//! not have one.
-//!
-//! | Type | Validity | Then | Children |
-//! | --- | --- | --- | --- |
-//! | Null | no | nothing | none |
-//! | Boolean, the fixed width types, `FixedSizeBinary` | yes | values | none |
-//! | `Utf8`, `Binary` and their large forms | yes | offsets, values | none |
-//! | `List`, `LargeList`, `Map` | yes | offsets | one |
-//! | `FixedSizeList` | yes | nothing | one |
-//! | `Struct` | yes | nothing | one per field |
-//!
-//! Unions, dictionaries, run end encoding and the view types are not here. They are all real and
-//! they all need something this milestone does not have: a union has no validity buffer and a type
-//! id map, a dictionary needs its values to arrive out of band, and a view array has a variable
-//! number of data buffers, which is the one thing that breaks counting. Each of them is refused by
-//! name rather than skipped.
 //!
 //! # The copy
 //!
@@ -40,12 +28,20 @@
 //! be aligned for it, and a `Vec<u8>` is aligned for `u8`. Fixing this properly means the guest
 //! allocating into memory the host already owns, which is the same change that removes the first
 //! copy, and it is not this milestone.
+//!
+//! # The second validation
+//!
+//! `ArrayData::try_new` validates what it is handed, so the structural checks run twice: once in the
+//! guard, which produces the message and carries the rule that failed, and once in Arrow, which is
+//! an implementation nobody here wrote. The cost of that is measured rather than assumed. Skipping
+//! Arrow's pass means building arrays unchecked, which is an `unsafe` call this crate forbids and
+//! would leave the guard's fuzzer as the only thing standing behind every read in the process.
 
 use arrow_array::{RecordBatch, RecordBatchOptions, make_array};
 use arrow_buffer::Buffer;
 use arrow_data::ArrayData;
-use arrow_schema::{DataType, SchemaRef};
-use iris_abi::Node;
+use arrow_schema::{Field, SchemaRef};
+use iris_guard::Layout;
 use iris_vm::RawBatch;
 
 use crate::error::{Error, Result};
@@ -54,34 +50,29 @@ use crate::error::{Error, Result};
 ///
 /// # Errors
 ///
-/// Returns [`Error::Shape`] if the batch does not describe the arrays the schema calls for,
-/// [`Error::Unsupported`] if the schema uses a type this build cannot assemble, and
-/// [`Error::Arrow`] if the buffers do not form a valid array.
+/// Returns [`Error::Guard`] if the batch does not describe the arrays the schema calls for or is
+/// not structurally sound, [`Error::Shape`] if it is sound but larger than this host can hold, and
+/// [`Error::Arrow`] if Arrow disagrees with the guard, which is a bug in one of them.
 pub(crate) fn record_batch(schema: &SchemaRef, batch: &RawBatch) -> Result<RecordBatch> {
+    // Nothing below this line does any checking, so nothing below this line runs until the batch has
+    // been checked.
+    iris_guard::check(schema, batch.rows, &batch.nodes, &batch.buffers)?;
+
     let rows = usize::try_from(batch.rows).map_err(|_| {
         Error::shape("a batch claims more rows than this host can hold in memory at once")
     })?;
 
     let mut cursor = Cursor {
-        nodes: &batch.nodes,
         buffers: &batch.buffers,
         node: 0,
         buffer: 0,
+        nodes: &batch.nodes,
     };
 
     let mut columns = Vec::with_capacity(schema.fields().len());
     for field in schema.fields() {
-        let data = cursor.array(field.data_type())?;
-        if data.len() != rows {
-            return Err(Error::shape(format!(
-                "the batch says {rows} rows and column {} has {}",
-                field.name(),
-                data.len()
-            )));
-        }
-        columns.push(make_array(data));
+        columns.push(make_array(cursor.array(field)?));
     }
-    cursor.finish()?;
 
     // The row count is passed explicitly so that a schema with no fields still produces a batch
     // with the right number of rows. `count(*)` over a projection of nothing is a real query.
@@ -94,30 +85,34 @@ pub(crate) fn record_batch(schema: &SchemaRef, batch: &RawBatch) -> Result<Recor
 }
 
 /// A position in the batch's two flat lists.
+///
+/// The guard has already walked these lists and found them to match the schema, so everything here
+/// that could be missing is not missing. It is still read through the same accessors rather than
+/// indexed directly, because a panic reached by disagreeing with the guard is the one failure mode
+/// this crate must not have.
 struct Cursor<'a> {
-    nodes: &'a [Node],
+    nodes: &'a [iris_abi::Node],
     buffers: &'a [Vec<u8>],
     node: usize,
     buffer: usize,
 }
 
 impl Cursor<'_> {
-    /// Builds one array and everything under it, taking what it is entitled to and no more.
-    fn array(&mut self, data_type: &DataType) -> Result<ArrayData> {
+    /// Builds one array and everything under it.
+    fn array(&mut self, field: &Field) -> Result<ArrayData> {
+        let data_type = field.data_type();
         let node = self.node()?;
         let len = usize::try_from(node.length).map_err(|_| {
             Error::shape("an array is longer than this host can hold in memory at once")
         })?;
 
-        let (values, children) = layout(data_type)?;
+        let Layout {
+            validity,
+            values,
+            children,
+        } = iris_guard::layout(data_type, field.name())?;
 
-        // Null and union are the two types the Arrow specification gives no validity buffer, and
-        // union is refused above, so this is the only exception that reaches here.
-        let validity = if matches!(data_type, DataType::Null) {
-            None
-        } else {
-            self.validity()?
-        };
+        let nulls = if validity { self.validity()? } else { None };
 
         let mut buffers = Vec::with_capacity(values);
         for _ in 0..values {
@@ -129,40 +124,28 @@ impl Cursor<'_> {
             child_data.push(self.array(child)?);
         }
 
-        let data = ArrayData::try_new(data_type.clone(), len, validity, 0, buffers, child_data)?;
-
-        // The node's null count is not used to build anything, which makes it the one field in a
-        // batch that nothing would otherwise check. A decoder that says an array has no nulls and
-        // hands over a validity buffer full of zeroes is broken in a way that produces wrong
-        // answers rather than an error, so it is checked here against what the bitmap says.
-        let counted = u64::try_from(data.null_count()).unwrap_or(u64::MAX);
-        if counted != node.null_count {
-            return Err(Error::shape(format!(
-                "an array says it has {} nulls and its validity buffer has {counted}",
-                node.null_count
-            )));
-        }
-
-        Ok(data)
+        Ok(ArrayData::try_new(
+            data_type.clone(),
+            len,
+            nulls,
+            0,
+            buffers,
+            child_data,
+        )?)
     }
 
-    fn node(&mut self) -> Result<Node> {
-        let node = self.nodes.get(self.node).copied().ok_or_else(|| {
-            Error::shape(format!(
-                "the schema calls for more arrays than the batch has, which has {}",
-                self.nodes.len()
-            ))
-        })?;
+    fn node(&mut self) -> Result<iris_abi::Node> {
+        let node =
+            self.nodes.get(self.node).copied().ok_or_else(|| {
+                Error::shape("the guard and this module disagree about array counts")
+            })?;
         self.node += 1;
         Ok(node)
     }
 
     fn bytes(&mut self) -> Result<&[u8]> {
         let bytes = self.buffers.get(self.buffer).ok_or_else(|| {
-            Error::shape(format!(
-                "the schema calls for more buffers than the batch has, which has {}",
-                self.buffers.len()
-            ))
+            Error::shape("the guard and this module disagree about buffer counts")
         })?;
         self.buffer += 1;
         Ok(bytes)
@@ -180,74 +163,6 @@ impl Cursor<'_> {
             Ok(Some(Buffer::from_slice_ref(bytes)))
         }
     }
-
-    /// Checks that the batch had nothing left over.
-    fn finish(&self) -> Result<()> {
-        if self.node != self.nodes.len() {
-            return Err(Error::shape(format!(
-                "the batch has {} arrays and the schema accounts for {}",
-                self.nodes.len(),
-                self.node
-            )));
-        }
-        if self.buffer != self.buffers.len() {
-            return Err(Error::shape(format!(
-                "the batch has {} buffers and the schema accounts for {}",
-                self.buffers.len(),
-                self.buffer
-            )));
-        }
-        Ok(())
-    }
-}
-
-/// How many buffers after the validity one, and which children, a type has.
-///
-/// This is the table in the module documentation, in the form the code uses it.
-fn layout(data_type: &DataType) -> Result<(usize, Vec<&DataType>)> {
-    let layout = match data_type {
-        DataType::Null => (0, Vec::new()),
-
-        DataType::Boolean
-        | DataType::Int8
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::Int64
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64
-        | DataType::Float16
-        | DataType::Float32
-        | DataType::Float64
-        | DataType::Date32
-        | DataType::Date64
-        | DataType::Time32(_)
-        | DataType::Time64(_)
-        | DataType::Timestamp(_, _)
-        | DataType::Duration(_)
-        | DataType::Interval(_)
-        | DataType::Decimal32(_, _)
-        | DataType::Decimal64(_, _)
-        | DataType::Decimal128(_, _)
-        | DataType::Decimal256(_, _)
-        | DataType::FixedSizeBinary(_) => (1, Vec::new()),
-
-        DataType::Utf8 | DataType::Binary | DataType::LargeUtf8 | DataType::LargeBinary => {
-            (2, Vec::new())
-        }
-
-        DataType::List(field) | DataType::LargeList(field) | DataType::Map(field, _) => {
-            (1, vec![field.data_type()])
-        }
-
-        DataType::FixedSizeList(field, _) => (0, vec![field.data_type()]),
-
-        DataType::Struct(fields) => (0, fields.iter().map(|f| f.data_type()).collect()),
-
-        other => return Err(Error::Unsupported(other.to_string())),
-    };
-    Ok(layout)
 }
 
 #[cfg(test)]
@@ -372,7 +287,7 @@ mod tests {
         };
 
         let err = record_batch(&schema, &batch).expect_err("a missing values buffer is not fine");
-        assert!(matches!(err, Error::Shape(_)), "{err}");
+        assert!(matches!(err, Error::Guard(_)), "{err}");
         assert!(err.to_string().contains("more buffers than the batch has"));
     }
 
@@ -426,7 +341,7 @@ mod tests {
         };
 
         let err = record_batch(&schema, &batch).expect_err("a dictionary is not supported yet");
-        assert!(matches!(err, Error::Unsupported(_)), "{err}");
+        assert!(matches!(err, Error::Guard(_)), "{err}");
         assert!(err.to_string().contains("Dictionary"), "{err}");
     }
 }

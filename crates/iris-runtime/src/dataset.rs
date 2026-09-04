@@ -104,6 +104,13 @@ impl Runtime {
             None => return Err(Error::SchemaEncoding("missing".to_owned())),
         };
 
+        // The schema is checked before the ABI, which is the less obvious of the two orderings
+        // here. A schema this host cannot walk would be refused whatever ABI the decoder wanted, so
+        // nothing is lost by refusing it first, and the ABI message promises to describe the
+        // schema. Describing a schema before checking it means formatting a type that may be
+        // nested past anything a formatter will survive, which turns a refusal into a crash.
+        iris_guard::check_schema(&schema)?;
+
         // The ABI is checked here rather than left to the handshake, for two reasons. A decoder
         // built against a major version this host does not speak is never going to agree on terms,
         // so compiling it first is work thrown away on the way to the same answer. And the message

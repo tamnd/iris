@@ -13,10 +13,11 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-arrow-array.workspace = true
-arrow-buffer.workspace = true
-arrow-data.workspace = true
+# Only the schema, on purpose. This crate checks the numbers that came out of a decoder before
+# anything turns them into an Arrow array, so it needs to know what the types are and nothing about
+# how they are built.
 arrow-schema.workspace = true
+iris-abi.workspace = true
 thiserror.workspace = true
 
 [lints]
