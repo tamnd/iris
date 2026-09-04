@@ -97,6 +97,19 @@ jobs:
         run: |
           rustup target add thumbv7em-none-eabi
           cargo build --locked --target thumbv7em-none-eabi -p iris-abi
+      # The gate is not that iris-abi has few dependencies. It is that it has none.
+      # Every decoder anyone writes carries this crate, so anything it pulls in,
+      # everyone pays for, forever, including people who cannot recompile.
+      - name: iris-abi must have no dependencies at all
+        run: |
+          deps=$(cargo tree -p iris-abi --edges normal --prefix none --locked | tail -n +2)
+          if [ -n "$deps" ]; then
+            echo "iris-abi grew a dependency:"
+            echo "$deps"
+            exit 1
+          fi
+          echo "iris-abi depends on nothing."
+
 
   features:
     name: Feature combinations
