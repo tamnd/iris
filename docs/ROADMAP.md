@@ -48,7 +48,7 @@ Neither branch is taken yet, for two reasons. The first is that both failing row
 
 **What changes.** Three things, and none of them is moving the gate. The gate was written down before the measurement, which is the only order in which a gate means anything, and a gate that moves when it is inconvenient is not a gate.
 
-1. M4 does not start until the x86-64 result has been reproduced on hardware nobody else is using. Of the machines this project has, one is eligible: the Intel Core i9-13900K. The three AMD EPYC boxes are shared tenancy virtual machines, so they cannot produce a number with a duration in it. The run goes through iris-bench against a registered claim. If it reproduces, the abstraction cost is real and the design has to answer it. If it does not, the hosted rows were noise and M4 proceeds as written. That is issue #65.
+1. M4 does not start until the x86-64 result has been reproduced on hardware nobody else is using. Of the machines this project has, one is eligible: the Intel Core i9-13900K. The three AMD EPYC boxes are shared tenancy virtual machines, so they cannot produce a number with a duration in it. The run goes through iris-bench against a registered claim. If it reproduces, the abstraction cost is real and the design has to answer it. If it does not, the hosted rows were noise and M4 proceeds as written. That is issue #65. The second shape below has already changed what that run is for.
 2. The naive refill is already ruled out as an implementation. A host memcpy of the window between chunks costs between a quarter and one and a half times the scan itself, on every machine measured including the ones that pass the abstraction gate. Whatever windowing ships, the bytes do not get copied into guest memory a window at a time. That is a real finding and it is the useful half of the second measurement.
 3. The probe grows a second windowed shape, compiled from Rust rather than written by hand, so that the next run of this measurement separates the cost of the design from the cost of the way the probe expresses it. That is issue #66, and it is done. The next section is what it found.
 
@@ -60,9 +60,22 @@ The probe now measures the window twice, in two shapes, and reports both. One is
 
 **The gate is judged against the compiled shape.** A decoder is Rust compiled to wasm32, so that is the loop that will actually run, and a gate applied to a loop nobody will ever execute is a gate on the probe. The order that was decided in matters, because choosing the more flattering of two numbers after seeing both is how a gate stops meaning anything: the argument is the one in issue #66, written down before either number existed, and the gate itself does not move. Three percent is still three percent, and both shapes are reported on every run whatever they say.
 
-The first thing the second shape shows is that the two are not measuring the same work. On the Apple M4 laptop the hand written flat scan takes 14.0 ms over 128 MiB and the compiled one takes 6.1 ms, so the toolchain is producing something more than twice as fast for the same arithmetic over the same bytes. Every ratio in the table above has that slower denominator underneath it. That does not make the old numbers wrong, and it does mean an overhead measured against the hand written pair is a percentage of a scan no decoder will ever run.
+Here is the same four hosted platforms, 256 MiB through a 16 MiB window, both shapes side by side, from run 33959663573:
 
-The second is that ruling out the naive refill got stronger rather than weaker. The copy costs what it costs in milliseconds either way, so dividing it by a scan that is twice as fast doubles it as a fraction. On the same laptop it goes from 25.5 percent of the hand written flat scan to 98.7 percent of the compiled one. Finding number two above stands, and it stands harder.
+| Machine | Hand written | Gate | Compiled | Gate | Compiled flat scan |
+| --- | --- | --- | --- | --- | --- |
+| Hosted `ubuntu-24.04-arm` | -3.2% | pass | -0.3% | pass | 13.57 ms |
+| Hosted `macos-latest` | +1.0% | pass | +2.0% | pass | 12.33 ms |
+| Hosted `windows-latest` | +37.4% | fail | -0.2% | pass | 16.34 ms |
+| Hosted `ubuntu-24.04` | +38.9% | fail | +3.0% | pass | 14.27 ms |
+
+**The architecture split was the probe.** Both x86-64 machines fail the gate by a factor of twelve in the hand written shape and pass it in the compiled one. There is no split left: every platform passes, and on three of the four the interval on the windowed scan overlaps the interval on the flat scan, so the overhead is not distinguishable from zero. The one row that does not overlap is `ubuntu-24.04` at 14.27 ms flat against 14.69 ms windowed, which is +3.0% and sits directly on the gate.
+
+So the answer to the question the M0 decision left open is that the hand written chunked loop is bad code on x86-64 specifically, and a decoder does not contain it. Reading each load as a base plus an index costs nothing on aarch64, where the compiled flat scan is nearly twice as fast as the hand written one and the hand written pair still passed, and it costs 38 percent on x86-64, where the compiled flat scan is barely faster at all and the hand written pair failed. The penalty was never in the flat scan or in the windowing. It was in the one loop that had to add two registers per load.
+
+The second finding is that ruling out the naive refill got stronger rather than weaker. The copy costs what it costs in milliseconds either way, so dividing it by a faster scan makes it a larger fraction. On this run the refill costs between 67 and 91 percent of the compiled flat scan on all four platforms, against 36 to 121 percent of the hand written one. Finding number two above stands, and it stands harder.
+
+**What this does to bet two.** It is not closed, and it is much closer to closed than it was. What it no longer is, is a question about whether the design has an x86-64 problem, because the shape a decoder actually has does not have one on either x86-64 machine here. What is left is that all four rows are shared hosted machines and one of them sits on the gate rather than under it, so the confirmation on hardware nobody else is using still has to happen. That is still #65, with a much narrower job: confirm a pass rather than diagnose a failure.
 
 ## M1, the ABI and a decoder that does nothing interesting
 
