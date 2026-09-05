@@ -1,0 +1,20 @@
+[package]
+name = "m0-scan"
+description = "The windowed scan shape the M0 probe compiles from Rust rather than writing by hand."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+# Not a crate anybody installs. It exists so that the M0 probe can measure a windowed loop that a
+# toolchain produced instead of one a person wrote, and it is meaningless outside that harness.
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
