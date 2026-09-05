@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       sweep:
-        description: "Also measure whether the windowed scan cost is reproducible across window sizes"
+        description: "Also repeat the probe across window sizes, to see whether the cost depends on one"
         type: boolean
         default: false
 
@@ -149,32 +149,37 @@ jobs:
         shell: pwsh
         run: ./ci/toolchain.ps1
 
+      # Six runs, not one, and the reason is the whole finding of issue #65.
+      #
+      # A single run reports a confidence interval taken from the samples inside it. That interval is
+      # the wrong one to judge a three percent gate by. The flat scan and the windowed scan are
+      # measured one after the other, so anything that moves the machine between the two blocks lands
+      # entirely in the difference between them, and an interval computed inside a block cannot see
+      # it by construction. What it describes is how consistent the samples were while the block was
+      # running, which is not the question being asked.
+      #
+      # On this machine that matters more than it sounds. Twenty four runs in one sitting put the
+      # windowed overhead anywhere between minus eight and plus eighteen percent, and the flat scan
+      # alone moved by a third across an hour on an idle machine nobody else is using. So what gets
+      # published is a median across whole runs with the spread taken across them, and six is the
+      # number that fits in the time this job already takes.
       - name: Run the probe
         shell: pwsh
-        run: cargo run --release --locked -p iris-vm --example m0_probe -- --json > probe-${{ matrix.name }}.json
+        run: |
+          foreach ($rep in 1..6) {
+            $out = "probe-$rep-${{ matrix.name }}.json"
+            cargo run --release --locked -q -p iris-vm --example m0_probe -- --json > $out
+            Get-Content $out
+          }
 
-      - name: Show it
-        shell: pwsh
-        run: Get-Content probe-${{ matrix.name }}.json
-
-      # Only when a dispatch asks for it. It is two dozen more runs of a job that already takes five
-      # minutes, and the answer only moves when the probe or the scan crate does.
+      # Only when a dispatch asks for it, because it is another twenty four runs and the answer only
+      # moves when the probe or the scan crate does.
       #
-      # The run above says what the windowed shape costs at one window size, with a confidence
-      # interval taken from the samples inside that run. That interval is the wrong one to judge the
-      # result by. The flat scan and the windowed scan are measured one after the other, so anything
-      # that moves the machine between the two blocks lands entirely in the difference, and an
-      # interval computed inside a block cannot see it. On this machine the flat scan alone comes out
-      # anywhere in a five percent band across runs minutes apart, which is the same size as the
-      # effect being judged. So the question of whether the windowed shape really costs anything
-      # needs repeats of the whole run, not more samples inside one.
-      #
-      # Four window sizes, because the single pass sweep this replaced put the largest overhead at 16
-      # and 32 MiB with both shoulders near zero, and either that shape is real or it is the run to
-      # run spread. The repeats are interleaved rather than blocked, so that a machine that drifts
-      # over the quarter hour this takes spreads that drift across all four sizes instead of handing
-      # it to whichever size was measured while the drift happened.
-      - name: Whether the window cost is reproducible
+      # This adds the window size as a second dimension, to settle whether the overhead depends on it
+      # at all. The repeats are interleaved rather than blocked, so that drift over the quarter hour
+      # it takes spreads across all four sizes instead of landing on whichever size was being
+      # measured when it happened.
+      - name: Whether the window cost depends on the window
         if: inputs.sweep
         shell: pwsh
         run: |
@@ -197,7 +202,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: probe-${{ matrix.name }}
-          path: probe-${{ matrix.name }}.json
+          path: probe-*-${{ matrix.name }}.json
           retention-days: 30
           if-no-files-found: error
 
