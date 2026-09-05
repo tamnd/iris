@@ -27,7 +27,7 @@ The gap is not a problem to fix later. A version that exists as a tag and not on
 
 Nothing about that is recoverable in place, because a version on crates.io is permanent. The workflow now checks out `v<version>` rather than a branch, so a version is one tree whether or not the run is quick, and the fix for the release itself was the next patch.
 
-`0.2.1` then published nine of the ten and stopped on the tenth, for an unrelated reason: the command line package was called `iris` and crates.io holds that name in reserve. That is the section below on the name. The nine that went out are all one tree, so `0.2.1` is still the first coherent version, and `irisdb 0.2.1` fills the gap under the name the tool now ships as.
+`0.2.1` then published nine of the ten and stopped on the tenth, for an unrelated reason: the command line package was called `iris` and crates.io holds that name in reserve. That is the section below on the name. The nine that went out are all one tree, so `0.2.1` is still the first coherent version, and the tenth is simply missing from it. `irisdb` first appears at `0.2.2`, which is the first tag whose tree contains that name, rather than being back filled at `0.2.1` from a tree the `v0.2.1` tag does not point at. That is the same rule as the paragraph above: a version that is a tag and not on crates.io is readable from the tag list, and a version published from the wrong tree is not readable from anywhere.
 
 The `Publish` workflow is manual, takes the version as an input, and defaults to a dry run. Run it as a dry run first. It checks that the version matches the tree, builds, tests, and then packages every crate without uploading anything.
 
