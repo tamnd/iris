@@ -170,5 +170,12 @@ pub mod probe {
 /// from outside the container, should not have to add a dependency to do it.
 pub use iris_trust::{Policy, Resolve, Untrusted};
 
+/// The identity of a decoder, which is the hash of its bytes and nothing else.
+///
+/// Re-exported because [`Dataset::decoder_digest`] and [`Windowed::decoder_digest`] hand one back. A
+/// caller comparing what ran here against what ran somewhere else is comparing these, and it should
+/// not have to add a dependency to name the type it is holding.
+pub use iris_format::Digest;
+
 /// The version of this crate, as reported by build metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

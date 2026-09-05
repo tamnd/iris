@@ -10,7 +10,7 @@ use iris_abi::{
     Writer, negotiate,
 };
 use iris_format::layout::HEADER_SIZE;
-use iris_format::{Container, Directory, Placement, SchemaEncoding, Section, SectionKind};
+use iris_format::{Container, Digest, Directory, Placement, SchemaEncoding, Section, SectionKind};
 use iris_source::{RangeSource, Segment, read_blocking};
 use iris_trust::{Policy, Verified};
 use iris_vm::{Decoder, Program, Vm};
@@ -154,6 +154,7 @@ impl Runtime {
             source,
             rows: opened.rows,
             name: opened.name,
+            digest: opened.digest,
             max_batch_rows: self.max_batch_rows,
         })
     }
@@ -223,6 +224,7 @@ impl Runtime {
             source_bytes: len,
             rows: opened.rows,
             name: opened.name,
+            digest: opened.digest,
             max_batch_rows: self.max_batch_rows,
         })
     }
@@ -278,6 +280,7 @@ impl Runtime {
             schema,
             rows: directory.dataset().rows,
             name: directory.dataset().name.clone(),
+            digest: verified.digest(),
         })
     }
 }
@@ -288,6 +291,7 @@ struct Opened {
     schema: SchemaRef,
     rows: u64,
     name: String,
+    digest: Digest,
 }
 
 /// The one section a decoder is shown.
@@ -338,6 +342,7 @@ pub struct Dataset<'a> {
     source: &'a [u8],
     rows: u64,
     name: String,
+    digest: Digest,
     max_batch_rows: u64,
 }
 
@@ -358,6 +363,17 @@ impl Dataset<'_> {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The identity of the decoder that ran, which is the hash of its bytes.
+    ///
+    /// This is what the container promised and what iris-trust checked before anything compiled it,
+    /// so it names the code rather than naming what the code calls itself. Two datasets that report
+    /// the same digest ran the same decoder, whatever they were opened from and wherever their bytes
+    /// happened to be, which is the only way a caller can say that from the outside.
+    #[must_use]
+    pub const fn decoder_digest(&self) -> Digest {
+        self.digest
     }
 
     /// Reads every row.
@@ -414,6 +430,7 @@ pub struct Windowed {
     source_bytes: u64,
     rows: u64,
     name: String,
+    digest: Digest,
     max_batch_rows: u64,
 }
 
@@ -466,6 +483,17 @@ impl Windowed {
     #[must_use]
     pub const fn source_bytes(&self) -> u64 {
         self.source_bytes
+    }
+
+    /// The identity of the decoder that ran, which is the hash of its bytes.
+    ///
+    /// This is what the container promised and what iris-trust checked before anything compiled it,
+    /// so it names the code rather than naming what the code calls itself. Two datasets that report
+    /// the same digest ran the same decoder, whatever they were opened from and wherever their bytes
+    /// happened to be, which is the only way a caller can say that from the outside.
+    #[must_use]
+    pub const fn decoder_digest(&self) -> Digest {
+        self.digest
     }
 
     /// Reads every row.
