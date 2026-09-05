@@ -17,6 +17,10 @@ iris-abi = { path = "../crates/iris-abi" }
 iris-format = { path = "../crates/iris-format" }
 iris-guard = { path = "../crates/iris-guard" }
 
+# The probe feature is what lets the window target ask whether an address is readable without
+# reading it. Without it the target compiles and checks half of what it exists to check.
+iris-source = { path = "../crates/iris-source", features = ["probe"] }
+
 # Arrow is here for the guard target, which builds arrays with Arrow's validation turned off and
 # reads them. Versions are written out rather than inherited because this package is excluded from
 # the workspace, which is what keeps a sanitizer build of it out of an ordinary `cargo test`.
@@ -24,6 +28,10 @@ arrow-array = "59.3.0"
 arrow-buffer = "59.3.0"
 arrow-data = "59.3.0"
 arrow-schema = "59.3.0"
+
+# The window target needs a real file on a real filesystem, because a mapping is the thing under
+# test and there is no way to map bytes that are not in a file.
+tempfile = "3.27.0"
 
 [[bin]]
 name = "fuzz_guard"
@@ -35,6 +43,13 @@ bench = false
 [[bin]]
 name = "fuzz_format"
 path = "fuzz_targets/fuzz_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_window"
+path = "fuzz_targets/fuzz_window.rs"
 test = false
 doc = false
 bench = false

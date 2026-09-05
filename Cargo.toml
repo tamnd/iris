@@ -54,6 +54,15 @@ toml = "1.1.5"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 wasmparser = "0.258.0"
+# The placeholder API, which is the only way to reserve address space on Windows and then map a file
+# view into part of it. windows-sys rather than the windows crate: this needs eight raw functions and
+# no COM, and windows-sys is the binding layer without the object model on top.
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_System_Memory",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+] }
 wasmtime = { version = "48.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
 
 criterion = "0.8.2"

@@ -17,5 +17,20 @@ bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+# Exposes the accessibility probe the window tests use. It is a feature rather than a public function
+# because "can this address be read" is a question about a mapping, not something a caller of a data
+# source should be reaching for, and the honest way to answer it is a syscall that reports a fault.
+probe = []
+
 [lints]
 workspace = true

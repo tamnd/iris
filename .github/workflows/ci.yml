@@ -83,10 +83,16 @@ jobs:
         with:
           tool: cargo-nextest
       # No separate build step. nextest --all-targets builds everything it would have built.
+      #
+      # Every feature is on because two of them gate tests rather than code. The window's stale read
+      # gate needs iris-source's probe to ask the operating system whether an address is readable,
+      # and without that feature the test that holds a pointer across a slide is not compiled at all,
+      # which is a milestone gate silently not running on the platform it exists for. Which features
+      # compile in which combinations is the `features` job's problem, not this one's.
       - name: Test
-        run: cargo nextest run --workspace --all-targets --locked
+        run: cargo nextest run --workspace --all-targets --all-features --locked
       - name: Doc tests
-        run: cargo test --workspace --doc --locked
+        run: cargo test --workspace --doc --all-features --locked
 
   # The decoder side of iris is a wasm32 module, so the tree has to keep
   # compiling for a target that has no operating system under it.
@@ -206,6 +212,11 @@ jobs:
           # Miri builds its own sysroot from source, which is most of this job's runtime and does not
           # live in target/, so rust-cache does not pick it up without being told.
           cache-directories: ~/.cache/miri
+      # iris-source is the other crate with unsafe in it and it is deliberately not in this list.
+      # Its unsafe is mmap, VirtualAlloc2 and MapViewOfFile3, which Miri has no shims for, so the
+      # run would not be a clean pass with nothing found, it would be an error about an unsupported
+      # operation on the first test. What stands in for Miri there is the stress test in
+      # crates/iris-source/tests/window.rs, which runs on all four platforms in the job above.
       - name: Run Miri over the crates that contain unsafe code
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
