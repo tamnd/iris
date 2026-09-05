@@ -104,15 +104,21 @@ impl<'a> HostSource<'a> {
 
 impl Source for HostSource<'_> {
     fn range(&mut self, offset: u64, len: u64) -> Result<&[u8]> {
-        let start = usize::try_from(offset)
-            .map_err(|_| Error::malformed("a range starts past what this target can address"))?;
+        // The length has to fit, because the bytes end up in this guest's memory either way. The
+        // offset does not, and that difference is the whole of the four gigabyte ceiling: a decoder
+        // reading a sixty gigabyte file asks for eight kilobytes at a time from an offset no
+        // wasm32 pointer could hold, and the offset stays sixty four bits wide all the way to the
+        // import. Narrowing it here would refuse exactly the case a windowed host exists to serve.
         let want = usize::try_from(len)
             .map_err(|_| Error::malformed("a range is longer than this target can address"))?;
-        let end = start
-            .checked_add(want)
-            .ok_or_else(|| Error::malformed("a range's offset and length overflow"))?;
 
-        if let Some(bytes) = self.resident.get(start..end) {
+        // Looked for in the resident bytes only when the offset is one this target could address,
+        // which for a file larger than that it never is: nothing past the ceiling is ever resident,
+        // because resident means it is in this guest's memory.
+        if let Ok(start) = usize::try_from(offset)
+            && let Some(end) = start.checked_add(want)
+            && let Some(bytes) = self.resident.get(start..end)
+        {
             return Ok(bytes);
         }
 

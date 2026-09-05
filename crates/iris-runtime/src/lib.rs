@@ -18,6 +18,39 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
+//! A file too large to hold is opened the other way, through a source it stays on.
+//!
+//! ```no_run
+//! use iris_runtime::Runtime;
+//! use iris_source::FileSource;
+//!
+//! let source = FileSource::open("readings.iris".as_ref())?;
+//! let runtime = Runtime::new()?;
+//! let mut dataset = runtime.open_windowed(Box::new(source))?;
+//!
+//! println!("{} rows behind a {} byte window", dataset.rows(), dataset.window_bytes());
+//! for batch in dataset.scan_rows(0, 1_000)? {
+//!     println!("{} rows", batch.num_rows());
+//! }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! # Two ways in
+//!
+//! [`Runtime::open`] takes the whole container as bytes and copies the data section into the guest.
+//! It is the fast path for a file that is already in memory, and it stops working at the point the
+//! file grows past what a wasm32 guest can address.
+//!
+//! [`Runtime::open_windowed`] takes a source instead and copies nothing. The metadata is read out
+//! of it, the decoder is read out of it and hashed like any other, and the data section is shown to
+//! the decoder as a source addressed from zero, so a range the decoder asks for is served out of
+//! the file while the file stays where it is. What bounds a request is the window rather than the
+//! file, which is why a dataset of any size reads through a window of a fixed one.
+//!
+//! No decoder changes between them, and that is the claim rather than a convenience. A decoder only
+//! ever calls `range` on whatever it was handed, so the two paths differ in what the host offers at
+//! the handshake and in nothing the decoder can see.
+//!
 //! # What it checks
 //!
 //! Three things, in this order, because the order is the point.
@@ -65,10 +98,10 @@
 //!
 //! # What it does not do yet
 //!
-//! The whole source is copied into the guest at once, so a dataset has to fit in a wasm32 address
-//! space and pays a copy on the way in. That is M1 being about the contract rather than the
-//! throughput, and M4 is where the window arrives. No decoder changes when it does, because a
-//! decoder only ever sees the range calls the SDK makes on its behalf.
+//! A windowed scan asks for one range at a time and waits for it. Coalescing neighbouring requests
+//! and reading ahead of the decoder are the things that turn that from correct into fast, and they
+//! belong on the host side of the boundary because the decoder is not allowed to know how far away
+//! its bytes are.
 //!
 //! Only time is metered. A decoder that allocates until the engine refuses gets an ordinary trap
 //! rather than a message about memory, and a decoder that spends its whole deadline on every call
@@ -87,7 +120,7 @@ mod dataset;
 mod error;
 mod schema;
 
-pub use dataset::{Dataset, Runtime};
+pub use dataset::{Dataset, Runtime, Windowed};
 pub use error::{Error, Result};
 pub use schema::{schema_from_ipc, schema_to_ipc};
 

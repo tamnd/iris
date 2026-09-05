@@ -83,11 +83,29 @@ pub enum Error {
 
     /// The container does not hold exactly one data section.
     ///
-    /// M1 hands the decoder one run of bytes and calls it the source. A dataset split across
-    /// several sections is a real thing and reading one is M4 work, where the host stops handing
-    /// over the whole source at once anyway.
+    /// This host hands the decoder one run of bytes and calls it the source. A dataset split across
+    /// several sections is a real thing and reading one is not something either path here does yet.
     #[error("this host reads a container with one data section, and this one has {0}")]
     DataSections(usize),
+
+    /// A scan left without giving the source back.
+    ///
+    /// The only way to reach this is a previous scan that was stopped between attaching the source
+    /// and detaching it, which today means a panic somewhere inside the sandbox. The dataset is left
+    /// unusable rather than silently reopened, because a source that was in the middle of serving a
+    /// range is not a source anybody should carry on with.
+    #[error(
+        "this dataset's source did not come back from an earlier scan, so it cannot be scanned"
+    )]
+    SourceLost,
+
+    /// A range this host had to read out of the source did not arrive.
+    ///
+    /// Only the windowed path reaches this, and only while it is reading the metadata it needs in
+    /// order to open the dataset at all. A range the decoder asks for later fails inside the
+    /// sandbox and comes back as [`Error::Vm`] instead.
+    #[error(transparent)]
+    Source(#[from] iris_source::SourceError),
 
     /// The host and the decoder could not agree on terms.
     #[error("the decoder and this host could not agree: {reason}: {detail}")]

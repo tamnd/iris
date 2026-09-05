@@ -149,6 +149,8 @@ The four failures are not one failure with four labels. The first two are the de
 
 There is deliberately no short read. A range is served in full or it is not served, because a decoder that gets fewer bytes than it asked for and does not check produces an answer that is wrong and looks right.
 
+The offset is sixty four bits wide and the length is thirty two, and the gap between them is where the four gigabyte ceiling goes. A range ends up in the guest's memory, so how long it is has to be something a wasm32 pointer can hold. Where it starts does not: a decoder reading a sixty gigabyte file asks for eight kilobytes at a time from offsets no pointer on that target could represent, and neither side narrows one on the way. A guest that narrowed the offset in order to look in its resident bytes first would put the ceiling back in the one place nobody would think to look for it.
+
 ## Suspension
 
 A host is allowed to answer `iris.require_range` later. When the bytes are not ready, the whole module stops inside the call, keeping its stack, its locals and everything it has decoded so far, and the host thread goes back to whatever the host wants to do with it. Polling the call again resumes the guest at the instruction after the import, with nothing replayed and nothing lost.

@@ -1,14 +1,18 @@
 //! Writing a container.
 //!
-//! The writer here builds the whole file in memory. That is the right shape for the sizes this
-//! project starts at and the wrong shape for the sizes it ends at, and it is deliberately the
-//! simple one first: the format puts its directory at the end precisely so that a streaming writer
-//! can be added later without changing a byte of the layout.
+//! The builder holds its sections in memory and can either hand back the finished file or write it
+//! out as it goes. Writing it out is what makes a dataset larger than this host's address space
+//! possible to produce at all, and it is possible because the format puts its directory at the end:
+//! nothing written early depends on anything decided late.
+//!
+//! What is left is that the sections themselves are still held, so a four gigabyte section costs
+//! four gigabytes here. Fixing that means letting a caller push bytes into a section rather than
+//! hand one over whole, and the layout already allows it.
 
-use iris_abi::{CapabilitySet, Writer, wire::align_up};
+use iris_abi::{CapabilitySet, Writer, wire};
 
 use crate::digest::Digest;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::layout::{
     DecoderLocation, FORMAT_MAJOR, FORMAT_MINOR, HEADER_SIZE, MAGIC, SchemaEncoding, SectionKind,
     TRAILER_SIZE, tag,
@@ -135,50 +139,79 @@ impl Builder {
     /// describe, which takes four gigabytes of it.
     pub fn build(&self) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        out.extend_from_slice(&MAGIC);
-        out.extend_from_slice(&FORMAT_MAJOR.to_le_bytes());
-        out.extend_from_slice(&FORMAT_MINOR.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        debug_assert_eq!(out.len(), HEADER_SIZE);
+        self.build_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// Lays the container out and writes it, returning how many bytes that was.
+    ///
+    /// The same file as [`Builder::build`], written rather than collected. It matters when the
+    /// sections are large: a container written this way costs the sections themselves and about a
+    /// kilobyte, where collecting it costs the sections twice over and briefly three times while a
+    /// buffer grows. A four gigabyte dataset is the difference between a machine that can write one
+    /// and a machine that cannot.
+    ///
+    /// The sections still have to be in memory, because this builder holds them. That is the next
+    /// thing to fix and the layout is already arranged for it: the directory is at the end, so
+    /// nothing written earlier depends on anything decided later.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::Io`] if the writer refused anything, and
+    /// [`crate::Error::Footer`] if a name or a schema is longer than the wire format can describe.
+    pub fn build_into(&self, out: impl std::io::Write) -> Result<u64> {
+        let mut out = Counted { inner: out, at: 0 };
+
+        out.write(&MAGIC)?;
+        out.write(&FORMAT_MAJOR.to_le_bytes())?;
+        out.write(&FORMAT_MINOR.to_le_bytes())?;
+        out.write(&0u32.to_le_bytes())?;
+        debug_assert_eq!(out.at, HEADER_SIZE as u64);
 
         let mut placed = Vec::with_capacity(self.sections.len());
         for (id, kind, bytes) in &self.sections {
-            pad(&mut out);
+            out.pad()?;
             placed.push(Section {
                 id: *id,
                 kind: *kind,
-                offset: out.len() as u64,
+                offset: out.at,
                 len: bytes.len() as u64,
                 digest: Digest::of(bytes),
             });
-            out.extend_from_slice(bytes);
+            out.write(bytes)?;
         }
 
-        pad(&mut out);
-        let footer_offset = out.len() as u64;
+        out.pad()?;
+        let footer_offset = out.at;
         let footer = self.encode_footer(&placed)?;
-        out.extend_from_slice(&footer);
+        out.write(&footer)?;
 
+        // The header is rebuilt here rather than kept, because it is sixteen bytes of constants and
+        // holding the bytes that were written would be one more thing that has to stay in step with
+        // what was written.
         let mut hasher = blake3::Hasher::new();
-        hasher.update(&out[..HEADER_SIZE]);
+        hasher.update(&MAGIC);
+        hasher.update(&FORMAT_MAJOR.to_le_bytes());
+        hasher.update(&FORMAT_MINOR.to_le_bytes());
+        hasher.update(&0u32.to_le_bytes());
         hasher.update(&footer);
         let root = Digest(*hasher.finalize().as_bytes());
 
-        out.extend_from_slice(&footer_offset.to_le_bytes());
+        out.write(&footer_offset.to_le_bytes())?;
         // The footer is metadata about a dataset, not the dataset. Four gigabytes of it would mean
         // something has gone wrong that a wider length field would not fix.
         let footer_len =
             u32::try_from(footer.len()).map_err(|_| iris_abi::Error::LengthOverflow)?;
-        out.extend_from_slice(&footer_len.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(root.as_bytes());
-        out.extend_from_slice(&MAGIC);
+        out.write(&footer_len.to_le_bytes())?;
+        out.write(&0u32.to_le_bytes())?;
+        out.write(root.as_bytes())?;
+        out.write(&MAGIC)?;
         debug_assert_eq!(
-            out.len() as u64,
+            out.at,
             footer_offset + footer.len() as u64 + TRAILER_SIZE as u64
         );
 
-        Ok(out)
+        Ok(out.at)
     }
 
     /// Encodes the footer, growing the buffer until it fits.
@@ -233,8 +266,36 @@ impl Builder {
     }
 }
 
-/// Pads out to the next eight byte boundary, so that a section starts somewhere a decoder can point
-/// a wider load at.
-fn pad(out: &mut Vec<u8>) {
-    out.resize(align_up(out.len()), 0);
+/// A writer that remembers how far into the file it is.
+///
+/// Every offset in a container is an offset from the start of the file, and a writer does not know
+/// where it is. Counting here rather than asking the writer is what lets this work over a pipe, a
+/// file and a `Vec` without any of them having to answer the same question three different ways.
+struct Counted<W> {
+    inner: W,
+    at: u64,
 }
+
+impl<W: std::io::Write> Counted<W> {
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.inner.write_all(bytes).map_err(|err| Error::io(&err))?;
+        self.at += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Pads out to the next eight byte boundary, so that a section starts somewhere a decoder can
+    /// point a wider load at.
+    ///
+    /// A byte at a time, and at most seven of them. Doing it that way keeps the arithmetic in file
+    /// offsets, which are sixty four bits wide because a container is allowed to be longer than this
+    /// host can address, and seven one byte writes cost nothing next to the section behind them.
+    fn pad(&mut self) -> Result<()> {
+        while !self.at.is_multiple_of(ALIGN) {
+            self.write(&[0])?;
+        }
+        Ok(())
+    }
+}
+
+/// What every section starts on, as a file offset rather than as a length.
+const ALIGN: u64 = wire::ALIGN as u64;

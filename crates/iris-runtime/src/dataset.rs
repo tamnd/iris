@@ -9,8 +9,10 @@ use iris_abi::{
     ABI_MAJOR, ABI_MINOR, Agreement, Capability, CapabilitySet, Hello, HelloAck, ScanRequest,
     Writer, negotiate,
 };
-use iris_format::{Container, SchemaEncoding, SectionKind};
-use iris_trust::Policy;
+use iris_format::layout::HEADER_SIZE;
+use iris_format::{Container, Directory, Placement, SchemaEncoding, Section, SectionKind};
+use iris_source::{RangeSource, Segment, read_blocking};
+use iris_trust::{Policy, Verified};
 use iris_vm::{Decoder, Program, Vm};
 
 use crate::assemble::record_batch;
@@ -23,14 +25,29 @@ use crate::schema::{describe, schema_from_ipc};
 /// on a mistake rather than a bound on a workload.
 const RECORD_LIMIT: usize = 1 << 20;
 
-/// What this host can do.
+/// What this host can do when it holds the whole container.
 ///
 /// The source is resident and copied into the guest whole, so random access is free and the decoder
 /// can be told so. Projection is offered because a decoder that can skip columns should, and a
 /// decoder that cannot will ignore it.
+///
+/// `require-range` is deliberately not here. The import exists on both paths, because it is part of
+/// the ABI rather than part of a host, but this path attaches nothing to serve it, so a decoder that
+/// needs to pull its own bytes has to be told that it is in the wrong place. Finding that out during
+/// the handshake is much better than finding it out from the first range that fails.
 const OFFERED: CapabilitySet = CapabilitySet::new()
     .with(Capability::RANDOM_ACCESS)
     .with(Capability::PROJECTION);
+
+/// What this host can do when the container stays where it is.
+///
+/// Everything the resident path offers, plus the two bits that describe pulling. `require-range`
+/// says the decoder may ask for bytes it was not given, and `sliding-window` says it will not be
+/// given all of them at once, which is the same thing the non zero `window_bytes` in the handshake
+/// says and is here so that a decoder can refuse on a bit rather than on a number.
+const OFFERED_WINDOWED: CapabilitySet = OFFERED
+    .with(Capability::REQUIRE_RANGE)
+    .with(Capability::SLIDING_WINDOW);
 
 /// A compiler, and the terms this host offers a decoder.
 ///
@@ -128,9 +145,95 @@ impl Runtime {
         // which is the whole design: there is no flag here to turn off, and adding one would mean
         // adding a function to another crate first.
         let verified = self.policy.decoder(&container)?;
+        let opened = self.prepare(container.directory(), &verified)?;
+        let source = container.section_bytes(data_section(container.directory())?);
+
+        Ok(Dataset {
+            program: opened.program,
+            schema: opened.schema,
+            source,
+            rows: opened.rows,
+            name: opened.name,
+            max_batch_rows: self.max_batch_rows,
+        })
+    }
+
+    /// Opens a container that stays where it is, read one range at a time.
+    ///
+    /// This is the path for a dataset that does not fit anywhere it could be held: bigger than
+    /// memory, bigger than a 32-bit guest can address, or simply not worth copying when a query
+    /// touches a hundredth of it. Nothing is read here except the header, the footer and the decoder
+    /// module, which together are about a kilobyte whatever the file is, and the payload is read by
+    /// the decoder asking for it while it decodes.
+    ///
+    /// The decoder is not told any of this and does not have a way to find out. It is shown the data
+    /// section addressed from zero, exactly as the resident path shows it a slice, and the two
+    /// differences it can observe are that the handshake names a window size and that a range may
+    /// take a while to arrive.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Runtime::open`] returns, plus [`Error::Source`] if one of the three ranges this
+    /// needs in order to open the dataset could not be read.
+    pub fn open_windowed(&self, source: Box<dyn RangeSource + Send>) -> Result<Windowed> {
+        let mut source = source;
+        let file_len = source.len();
+
+        // The trailer first, because it is the only part of a container that can be found without
+        // being told where it is, and it says where the footer is. Then the header and the footer,
+        // which is everything the metadata is made of.
+        let trailer_at = Placement::trailer_at(file_len)?;
+        let trailer = read(source.as_mut(), trailer_at, Placement::TRAILER_LEN)?;
+        let placement = Placement::read(&trailer, file_len)?;
+        let header = read(source.as_mut(), 0, HEADER_SIZE)?;
+        let footer = read(
+            source.as_mut(),
+            placement.footer_at(),
+            placement.footer_len(),
+        )?;
+        let directory = Directory::parse(&header, &footer, placement)?;
+
+        // The decoder module is read whole, because compiling it means having all of it, and it is
+        // the one section that is small by construction. Reading it here rather than handing the
+        // trust crate a source is what keeps that crate free of any opinion about where bytes live.
+        let embedded = match directory.decoder_section() {
+            Some(section) => Some(read(
+                source.as_mut(),
+                section.offset,
+                section_len(section)?,
+            )?),
+            None => None,
+        };
+        let record = directory.decoder().ok_or(iris_trust::Untrusted::Missing)?;
+        let verified = self.policy.decoder_read(record, embedded)?;
+        let opened = self.prepare(&directory, &verified)?;
+
+        let section = data_section(&directory)?;
+        let (at, len) = (section.offset, section.len);
+        // Everything below borrows nothing from the footer, so the metadata can go now and the
+        // handle that is left is a program, a schema and a source.
+        let window_bytes = source.largest().unwrap_or(0) as u64;
+        let data = Segment::new(source, at, len)?;
+
+        Ok(Windowed {
+            program: opened.program,
+            schema: opened.schema,
+            source: Some(Box::new(data)),
+            window_bytes,
+            source_bytes: len,
+            rows: opened.rows,
+            name: opened.name,
+            max_batch_rows: self.max_batch_rows,
+        })
+    }
+
+    /// Everything the two paths do between having the metadata and having a compiled decoder.
+    ///
+    /// It is one function because the checks and the order they happen in are the interesting part,
+    /// and two copies of an ordering is two orderings waiting to drift.
+    fn prepare(&self, directory: &Directory<'_>, verified: &Verified<'_>) -> Result<Opened> {
         let decoder = verified.record();
-        let module = verified.module();
-        let schema = match container.schema() {
+        let schema = match directory.schema() {
             Some(schema) if schema.encoding == SchemaEncoding::ArrowIpc => {
                 Arc::new(schema_from_ipc(schema.bytes)?)
             }
@@ -166,33 +269,61 @@ impl Runtime {
         // The digest goes with the module, so that a decoder that traps or runs away is named in the
         // error by the one identity it did not choose for itself. The name in the container is what
         // the decoder calls itself, and a decoder that has been swapped would still be called that.
-        let program = self.vm.compile(module, &verified.digest().to_string())?;
+        let program = self
+            .vm
+            .compile(verified.module(), &verified.digest().to_string())?;
 
-        // M1 hands the decoder one run of bytes and calls it the source, so a container with two
-        // data sections has no unambiguous answer to what the decoder should see. Refusing is
-        // better than picking one.
-        let data: Vec<_> = container
-            .sections()
-            .iter()
-            .filter(|s| s.kind == SectionKind::Data)
-            .collect();
-        let [section] = data.as_slice() else {
-            return Err(Error::DataSections(data.len()));
-        };
-        let source = container.section_bytes(section);
-
-        let rows = container.dataset().rows;
-        let name = container.dataset().name.clone();
-
-        Ok(Dataset {
+        Ok(Opened {
             program,
             schema,
-            source,
-            rows,
-            name,
-            max_batch_rows: self.max_batch_rows,
+            rows: directory.dataset().rows,
+            name: directory.dataset().name.clone(),
         })
     }
+}
+
+/// What both open paths have once the metadata has been read and the decoder compiled.
+struct Opened {
+    program: Program,
+    schema: SchemaRef,
+    rows: u64,
+    name: String,
+}
+
+/// The one section a decoder is shown.
+///
+/// This host hands the decoder one run of bytes and calls it the source, so a container with two
+/// data sections has no unambiguous answer to what the decoder should see. Refusing is better than
+/// picking one.
+fn data_section<'d>(directory: &'d Directory<'_>) -> Result<&'d Section> {
+    let data: Vec<_> = directory
+        .sections()
+        .iter()
+        .filter(|s| s.kind == SectionKind::Data)
+        .collect();
+    let [section] = data.as_slice() else {
+        return Err(Error::DataSections(data.len()));
+    };
+    Ok(section)
+}
+
+/// How long a section is, as a length this machine can ask for in one read.
+fn section_len(section: &Section) -> Result<usize> {
+    usize::try_from(section.len).map_err(|_| {
+        Error::Container(iris_format::Error::TooLarge {
+            what: "a section this host has to read whole",
+            needed: section.len,
+        })
+    })
+}
+
+/// Reads a range and waits for it.
+///
+/// Opening is the one place this host is allowed to block, because there is nothing else it could
+/// be doing: no decoder has been compiled and no rows have been asked for. Once a scan is running
+/// the same wait belongs to the caller, which is what [`iris_vm::Running`] is for.
+fn read(source: &mut dyn RangeSource, at: u64, len: usize) -> Result<Vec<u8>> {
+    Ok(read_blocking(source, at, len)?.to_vec())
 }
 
 /// An open dataset, with its decoder compiled and its schema read.
@@ -251,43 +382,7 @@ impl Dataset<'_> {
     pub fn scan_rows(&self, start: u64, count: u64) -> Result<Vec<RecordBatch>> {
         let mut decoder = Decoder::instantiate(&self.program)?;
         decoder.load_source(self.source)?;
-
-        let hello = self.hello();
-        // Waited on rather than polled. This host loads the whole source in up front, so a range
-        // never misses and the call never suspends, and the day it does the change is here rather
-        // than in any decoder.
-        let handshake = decoder.start(&record(|w| hello.encode(w))?).wait()?;
-
-        // The decoder has already said yes by this point, and this is the host saying yes back.
-        // Both sides check, because a decoder that agrees to terms it cannot meet and a host that
-        // runs a decoder it cannot serve are different bugs and only one of them is ours.
-        let ack = HelloAck {
-            abi_major: handshake.abi_major,
-            abi_minor: handshake.abi_minor,
-            required: handshake.required,
-            optional: handshake.optional,
-            decoder_id: &handshake.decoder_id,
-        };
-        let _agreement: Agreement =
-            negotiate(&hello, &ack).map_err(|refusal| Error::refused(&refusal))?;
-
-        let request = ScanRequest {
-            row_start: start,
-            row_count: count,
-            ..ScanRequest::everything()
-        };
-        let raw = decoder.scan(&record(|w| request.encode(w))?).wait()?;
-
-        let mut batches = Vec::with_capacity(raw.len());
-        for batch in &raw {
-            // An empty batch is how a decoder says there are no more rows. It has no arrays, so
-            // there is nothing to assemble and nothing to check against the schema.
-            if batch.rows == 0 && batch.nodes.is_empty() {
-                continue;
-            }
-            batches.push(record_batch(&self.schema, batch)?);
-        }
-        Ok(batches)
+        run(&mut decoder, &self.hello(), &self.schema, start, count)
     }
 
     fn hello(&self) -> Hello {
@@ -295,13 +390,173 @@ impl Dataset<'_> {
             abi_major: ABI_MAJOR,
             abi_minor: ABI_MINOR,
             // Zero means the whole source is visible, which it is: it was copied into the guest in
-            // one piece. That stops being true at M4 and no decoder changes when it does.
+            // one piece. A dataset opened with `Runtime::open_windowed` says a real number here,
+            // and no decoder changes between the two.
             window_bytes: 0,
             max_batch_rows: self.max_batch_rows,
             offered: OFFERED,
             source_bytes: self.source.len() as u64,
         }
     }
+}
+
+/// An open dataset whose bytes have stayed where they are.
+///
+/// The same three things a [`Dataset`] holds, plus the source itself, which is why this one is not
+/// borrowed from anything and why scanning takes `&mut self`. A source is a position as well as a
+/// place: reading a range moves a window, counts a request, and in general is not something two
+/// scans can do to the same source at once.
+pub struct Windowed {
+    program: Program,
+    schema: SchemaRef,
+    source: Option<Box<dyn RangeSource + Send>>,
+    window_bytes: u64,
+    source_bytes: u64,
+    rows: u64,
+    name: String,
+    max_batch_rows: u64,
+}
+
+/// Written out rather than derived, because a source is not required to be printable and requiring
+/// it would be this crate deciding what a fourth implementation of the trait has to look like.
+impl std::fmt::Debug for Windowed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Windowed")
+            .field("name", &self.name)
+            .field("rows", &self.rows)
+            .field("schema", &self.schema)
+            .field("window_bytes", &self.window_bytes)
+            .field("source_bytes", &self.source_bytes)
+            .field("max_batch_rows", &self.max_batch_rows)
+            .field("attached", &self.source.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Windowed {
+    /// The Arrow schema the container carries.
+    #[must_use]
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    /// How many rows the container says it has.
+    #[must_use]
+    pub const fn rows(&self) -> u64 {
+        self.rows
+    }
+
+    /// The dataset's name, which nothing here interprets.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// How much of the source the host will keep visible at once, or zero if it is not bounded.
+    ///
+    /// This is the number the decoder is told during the handshake, and it is the whole of what a
+    /// decoder needs to know about the arrangement: a decoder that never asks for more than this in
+    /// one range will never be refused for asking too much.
+    #[must_use]
+    pub const fn window_bytes(&self) -> u64 {
+        self.window_bytes
+    }
+
+    /// How long the data section is.
+    #[must_use]
+    pub const fn source_bytes(&self) -> u64 {
+        self.source_bytes
+    }
+
+    /// Reads every row.
+    ///
+    /// # Errors
+    ///
+    /// See [`Windowed::scan_rows`].
+    pub fn scan(&mut self) -> Result<Vec<RecordBatch>> {
+        self.scan_rows(0, self.rows)
+    }
+
+    /// Reads a range of rows, pulling the bytes it needs as it goes.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Dataset::scan_rows`], plus [`Error::Vm`] carrying [`iris_vm::Error::Source`]
+    /// if a range the decoder asked for could not be served.
+    pub fn scan_rows(&mut self, start: u64, count: u64) -> Result<Vec<RecordBatch>> {
+        let mut decoder = Decoder::instantiate(&self.program)?;
+
+        // Nothing is loaded up front, so the guest's resident buffer stays empty and every range
+        // the decoder asks for goes out through `require_range`. The source comes back afterwards
+        // whether or not the scan worked, because a failed scan is not a reason to lose the file.
+        let source = self.source.take().ok_or(Error::SourceLost)?;
+        decoder.attach(source);
+        let outcome = run(&mut decoder, &self.hello(), &self.schema, start, count);
+        self.source = decoder.detach();
+        outcome
+    }
+
+    fn hello(&self) -> Hello {
+        Hello {
+            abi_major: ABI_MAJOR,
+            abi_minor: ABI_MINOR,
+            window_bytes: self.window_bytes,
+            max_batch_rows: self.max_batch_rows,
+            offered: OFFERED_WINDOWED,
+            source_bytes: self.source_bytes,
+        }
+    }
+}
+
+/// Shakes hands, scans, and turns what comes back into record batches.
+///
+/// Both open paths end here, and the only thing that differs between them is the [`Hello`] they
+/// bring. That is the claim M4 makes, written as one function rather than as a sentence: a decoder
+/// handed a resident buffer and the same decoder pulling ranges out of a file it cannot hold are
+/// running the same host code.
+fn run(
+    decoder: &mut Decoder,
+    hello: &Hello,
+    schema: &SchemaRef,
+    start: u64,
+    count: u64,
+) -> Result<Vec<RecordBatch>> {
+    // Waited on rather than polled. Waiting is what a host with a thread to spare does, and it is
+    // what this one is: it has been handed a scan and has nothing else to do until it answers. A
+    // host that does have something else to do drives `iris_vm::Running` itself, which is why the
+    // suspension is in that crate rather than hidden in here.
+    let handshake = decoder.start(&record(|w| hello.encode(w))?).wait()?;
+
+    // The decoder has already said yes by this point, and this is the host saying yes back.
+    // Both sides check, because a decoder that agrees to terms it cannot meet and a host that
+    // runs a decoder it cannot serve are different bugs and only one of them is ours.
+    let ack = HelloAck {
+        abi_major: handshake.abi_major,
+        abi_minor: handshake.abi_minor,
+        required: handshake.required,
+        optional: handshake.optional,
+        decoder_id: &handshake.decoder_id,
+    };
+    let _agreement: Agreement =
+        negotiate(hello, &ack).map_err(|refusal| Error::refused(&refusal))?;
+
+    let request = ScanRequest {
+        row_start: start,
+        row_count: count,
+        ..ScanRequest::everything()
+    };
+    let raw = decoder.scan(&record(|w| request.encode(w))?).wait()?;
+
+    let mut batches = Vec::with_capacity(raw.len());
+    for batch in &raw {
+        // An empty batch is how a decoder says there are no more rows. It has no arrays, so
+        // there is nothing to assemble and nothing to check against the schema.
+        if batch.rows == 0 && batch.nodes.is_empty() {
+            continue;
+        }
+        batches.push(record_batch(schema, batch)?);
+    }
+    Ok(batches)
 }
 
 /// Writes a record into a fresh buffer, growing until it fits.

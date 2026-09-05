@@ -118,6 +118,80 @@ jobs:
           CARGO_BUILD_JOBS: ${{ matrix.jobs }}
         run: cargo build --locked --target wasm32-unknown-unknown -p iris-abi -p iris-decoder --lib --examples
 
+  # The M4 gate, which is the one test in this tree that needs a real disk.
+  #
+  # It writes a container whose data section is a little over four gigabytes and reads rows from
+  # past that mark through a window a sixteenth of its size. Four gigabytes is the wasm32 address
+  # space and therefore the ceiling in the prior art, and the point of the test is that the ceiling
+  # is on what a decoder can hold rather than on what it can read. It is `#[ignore]`d in the tree so
+  # that no hosted runner ever writes four gigabytes, and it is named here rather than run with a
+  # bare `--ignored` so that adding a second slow test does not silently add it to this job.
+  #
+  # Both platforms, because what moves under the decoder here is a memory mapping and the two
+  # operating systems do not move one the same way. The twelve gigabyte machine is left out: the
+  # fixture is built in memory before it is written, so the peak is the fixture plus the toolchain
+  # that is still resident, and that box has other things to be getting on with.
+  window:
+    name: Four gigabyte gate on ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: epyc-8c-24gb
+            runner: [self-hosted, linux, x64, epyc-8c-24gb]
+            jobs: 6
+          - name: i9-13900k-64gb
+            runner: [self-hosted, windows, x64, i9-13900k-64gb]
+            jobs: 16
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+          cargo --version
+
+      - name: Toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./ci/toolchain.ps1 -Wasm
+
+      - name: A file larger than the guest can address
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+        run: >-
+          cargo test --locked -p iris-runtime --test windowed --
+          --ignored --exact
+          a_dataset_larger_than_four_gibibytes_reads_through_a_window_a_fraction_of_its_size
+
+      # The test removes its own fixture on the way out, including when it fails, because a guard
+      # that runs on unwind is the only kind that helps. This is for the run that does not get to
+      # unwind at all, where a self hosted machine would otherwise keep four gigabytes until somebody
+      # noticed.
+      - name: Clean up after a run that did not
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: rm -rf target/gate-window
+
+      - name: Clean up after a run that did not
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: Remove-Item -Recurse -Force -ErrorAction SilentlyContinue target/gate-window
+
   # The M0 probe, on the one machine in the fleet whose timings mean anything.
   #
   # Bet two passed on every aarch64 machine and failed on every x86-64 one, and every failing row was

@@ -34,6 +34,7 @@
 mod build;
 mod container;
 mod digest;
+mod directory;
 mod error;
 pub mod layout;
 mod meta;
@@ -41,6 +42,7 @@ mod meta;
 pub use build::Builder;
 pub use container::{Container, FileHeader};
 pub use digest::Digest;
+pub use directory::{Directory, Placement};
 pub use error::{Error, Result};
 pub use layout::{DecoderLocation, FORMAT_MAJOR, FORMAT_MINOR, MAGIC, SchemaEncoding, SectionKind};
 pub use meta::{Dataset, DecoderRef, Schema, Section};
