@@ -10,6 +10,8 @@ The version lives in one place, `[workspace.package]` in the root `Cargo.toml`, 
 
 `v0.3.0` and `v0.4.0` point at trees a few commits apart, and that is not a mistake. M3 ticked its last box before M2 ticked its last box, because M2 was waiting on a fuzzing soak that had to run for a full day while M3's work merged around it. Tags are cut in version order rather than in the order the milestones happened to close, so the milestone a minor tracks is still readable from the number, and the two trees are close together because the milestones finished close together. The alternative, giving M3 the lower number because it finished first, would make the version numbers disagree with the milestone numbers everywhere else in the project for the sake of one pair of tags.
 
+`v0.5.0` carries no change to this repository at all beyond the version itself. M4's last open box was #26, which asks whether a resident local file stays within three percent of the whole buffer path, and answering it meant building a measurement in `tamnd/iris-bench` rather than changing anything here. The tag is still worth cutting, because what a minor marks is a milestone finishing and not a diff. A reader who compares `v0.4.0` against `v0.5.0` and finds one line should read the milestone rather than the range.
+
 ## Cutting one
 
 1. Open a release pull request that bumps `version` in the root `Cargo.toml` and the `version` on each path dependency, and run `cargo update -w` so the lockfile follows.
