@@ -168,6 +168,7 @@ jobs:
           --ignored --test-threads 1 --exact
           one_decoder_reads_a_file_and_an_object_and_says_the_same_thing
           what_a_scan_says_it_moved_is_what_the_endpoint_recorded
+          reading_ahead_of_a_scan_costs_fewer_requests_for_the_same_answer
 
       - name: Clean up after a run that did not
         if: always()

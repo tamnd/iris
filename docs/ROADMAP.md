@@ -171,6 +171,14 @@ A third one is about the shape of the API rather than about a bug. A view starts
 
 **Gate.** A decoder reads a file larger than 4 GiB correctly through a 256 MiB window. The same decoder binary, unmodified, reads from a local file and from an S3 compatible endpoint. Unmodified is the gate: if the decoder needs a recompile then the abstraction has leaked. A resident local file stays within 3% of the M1 whole buffer path, which re-checks the M0 bet against real code. The resumable path works from a single threaded host that never blocks. Request count and bytes transferred are reported per scan, because wall clock alone hides the mechanism.
 
+### One block of readahead is worse than none
+
+Coalescing was going to be one block: fetch more than was asked for, serve the next request out of it, and the run of small adjacent requests a decoder makes down a column becomes one trip. That works on the pattern it was designed against and it does nothing at all on the pattern a columnar scan actually produces, which is a piece of the first column, then a piece of the second, then a piece of the third, then back to the first. Those three places are megabytes apart. Every turn between columns throws the block away, the hit rate is zero, and each miss now fetches a whole block in order to serve a fraction of it, so the bytes go up and the request count does not come down.
+
+Holding one block per column fixes it, and the cost is that the blocks have to be copied and held on the host side rather than borrowed from the source underneath, because a source keeps at most whatever it last fetched. That is the trade: memory and one copy per block, against a round trip per request. It is worth making when a request crosses a network and it is not worth making over a mapped local file, where a window slide is already the request and everything inside the current view is a comparison.
+
+On the object storage gate's fixture, 50,000 rows of three columns read in 4,096 row batches from an S3 compatible endpoint, a full scan makes 40 requests moving 1,200,016 bytes when the host asks for exactly what the decoder asked for. Through 128 KiB of readahead with one stream per column it makes 11 requests moving 1,391,336 bytes. So a quarter of the requests for 16% more bytes, which is the trade stated in the units it is actually made in. Both halves are asserted in the gate rather than left as a number in a document.
+
 ## M5, a real decoder and the measurements that matter
 
 A production grade decoder for something worth decoding. BtrBlocks is the first target: its 16 MiB chunked layout is exactly the shape `require_range` is designed for, and the literature describes it as good but unadopted, which is the thesis demonstrated.

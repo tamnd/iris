@@ -9,9 +9,11 @@
 //! interchangeable because they all pass the same suite in [`conformance`], which is public so that
 //! a fourth implementation written somewhere else can be held to the same promises.
 //!
-//! [`Segment`] is not a fourth source but an adapter over any of them. It presents a byte range of
-//! one source as a source in its own right, which is how a decoder is shown one section of a
-//! container and nothing else when the container is too large to hold.
+//! [`Segment`] and [`Readahead`] are not sources but adapters over any of them. A segment presents a
+//! byte range of one source as a source in its own right, which is how a decoder is shown one section
+//! of a container and nothing else when the container is too large to hold. Readahead fetches in
+//! blocks, so that a run of small adjacent requests costs one trip rather than one each, and how far
+//! ahead to read is a number the host picks and the decoder cannot see.
 //!
 //! The one thing to know before reading the trait is that asking for a range does not wait. It
 //! either hands back the bytes or says they are not here yet, and the host does something else in
@@ -30,10 +32,12 @@
 //! supported platforms on every change.
 
 pub mod memory;
+pub mod readahead;
 pub mod segment;
 pub mod source;
 
 pub use memory::MemorySource;
+pub use readahead::Readahead;
 pub use segment::Segment;
 pub use source::{Fetch, RangeSource, SourceError, Traffic, bounds, read_blocking};
 
