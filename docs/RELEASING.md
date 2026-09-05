@@ -27,6 +27,8 @@ The gap is not a problem to fix later. A version that exists as a tag and not on
 
 Nothing about that is recoverable in place, because a version on crates.io is permanent. The workflow now checks out `v<version>` rather than a branch, so a version is one tree whether or not the run is quick, and the fix for the release itself was the next patch.
 
+`0.2.1` then published nine of the ten and stopped on the tenth, for an unrelated reason: the command line package was called `iris` and crates.io holds that name in reserve. That is the section below on the name. The nine that went out are all one tree, so `0.2.1` is still the first coherent version, and `irisdb 0.2.1` fills the gap under the name the tool now ships as.
+
 The `Publish` workflow is manual, takes the version as an input, and defaults to a dry run. Run it as a dry run first. It checks that the version matches the tree, builds, tests, and then packages every crate without uploading anything.
 
 The dry run is one `cargo package --workspace` rather than ten `cargo publish --dry-run` calls, and the difference matters on a first release. A single crate dry run resolves that crate's dependencies against crates.io, so on a first release everything downstream of `iris-abi` fails to resolve for a reason that has nothing to do with whether the release is good. Packaging the workspace builds a temporary registry out of the workspace itself, so each crate is verified against the versions that are about to go out.
@@ -45,11 +47,19 @@ A crate that has been throttled for longer than `MAX_WAIT_PER_CRATE` stops the r
 
 Dependency order, written down in the script rather than derived, because the list is read by anybody trying to understand the release and a derived one is not:
 
-`iris-abi`, `iris-format`, `iris-guard`, `iris-source`, `iris-trust`, `iris-native`, `iris-decoder`, `iris-vm`, `iris-runtime`, `iris`.
+`iris-abi`, `iris-format`, `iris-guard`, `iris-source`, `iris-trust`, `iris-native`, `iris-decoder`, `iris-vm`, `iris-runtime`, `irisdb`.
 
 The script checks that list against the manifests before it uploads anything, which it does because the list was wrong once in exactly the way a hand written list goes wrong. `iris-native` sat above `iris-trust` and depends on it, and nothing noticed until crates.io refused the upload with three names already published. A half published release is the expensive failure here, since a version cannot be taken back, only yanked, so reading ten manifests first is a second of work against a mistake that costs an afternoon.
 
-The command line tool is the package named `iris`, not `iris-cli`, because `iris-cli` on crates.io belongs to somebody else and has since well before this project existed. The binary it installs is called `iris` either way.
+### The command line tool is published as `irisdb`
+
+The package is `irisdb` and the binary it installs is `iris`. So the way to get the tool is `cargo install irisdb`, and the thing you then type is `iris`.
+
+This took two goes to arrive at. `iris-cli` on crates.io belongs to somebody else and has since well before this project existed, so the package was named `iris` instead. That is what `0.2.1` tried to publish, and crates.io answered `400 Bad Request: cannot upload a crate with a reserved name`. It keeps a list of names nobody may upload, `iris` is on it, and there is no way to find that out ahead of time: the crate does not exist, so every check for whether the name is free says it is free. The other nine crates went out and the tenth never could.
+
+Asking crates.io to release a reserved name is possible and it is an open ended request that somebody has to act on, which is not a thing a release should wait behind. Renaming the package costs one manifest line and leaves the binary, the repository, the project and the other nine crates alone, so that is what happened.
+
+`ci/publish.sh` now stops on this rather than retrying it. Every other failure it knows about is either the rate limit or index lag, and both of those are fixed by waiting, so the fallback was to wait ten minutes and try once more. A reserved name is neither, and the run that found this out spent twenty minutes proving it twice.
 
 ### The token
 

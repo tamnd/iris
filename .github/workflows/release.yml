@@ -50,7 +50,9 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           rustup target add "$TARGET"
-          cargo build --release --locked --target "$TARGET" -p iris
+          # The package is irisdb and the binary it produces is iris. crates.io holds the bare name,
+          # so only the registry slot changed and everything below still copies a file called iris.
+          cargo build --release --locked --target "$TARGET" -p irisdb
       - name: Package
         shell: bash
         env:

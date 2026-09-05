@@ -820,18 +820,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iris"
-version = "0.2.1"
-dependencies = [
- "anyhow",
- "clap",
- "iris-format",
- "iris-runtime",
- "iris-source",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "iris-abi"
 version = "0.2.1"
 
@@ -912,6 +900,18 @@ dependencies = [
  "thiserror",
  "tracing",
  "wasmtime",
+]
+
+[[package]]
+name = "irisdb"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "iris-format",
+ "iris-runtime",
+ "iris-source",
+ "tracing-subscriber",
 ]
 
 [[package]]

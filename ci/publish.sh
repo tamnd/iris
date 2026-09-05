@@ -18,7 +18,7 @@ set -euo pipefail
 VERSION="${1:?usage: ci/publish.sh <version> [--dry-run]}"
 DRY_RUN="${2:-}"
 
-# Dependency order. iris-abi first because everything else is downstream of it, and iris last
+# Dependency order. iris-abi first because everything else is downstream of it, and irisdb last
 # because it is the command line tool and depends on most of the tree.
 #
 # This list was wrong once, in the way a hand written list goes wrong: iris-native sat above
@@ -36,7 +36,7 @@ CRATES=(
   iris-decoder
   iris-vm
   iris-runtime
-  iris
+  irisdb
 )
 
 # Refuses a list that publishes a crate before something it depends on.
@@ -136,6 +136,13 @@ seconds_until() {
 #
 # Anything that is not a 429 gets one retry and then stops the release. Those failures are index lag,
 # which one wait fixes, or a real problem, which no amount of waiting fixes.
+#
+# A reserved name is the second kind and is called out separately, because it looks like the first
+# kind from here. crates.io keeps a list of names nobody may upload and answers those with a 400, and
+# there is no endpoint that says whether a name is on it: the crate does not exist, so the check
+# above reports it as a free name and the release walks all the way to the upload before finding
+# out. That is how `iris` 0.2.1 failed, twice, ten minutes apart, at the end of a run that had
+# already published the other nine crates. Waiting is never going to help, so this stops instead.
 publish_crate() {
   local crate="$1" log waited=0 wait until
   log="$(mktemp)"
@@ -144,6 +151,13 @@ publish_crate() {
   while :; do
     if cargo publish --locked -p "$crate" 2>&1 | tee "$log"; then
       return 0
+    fi
+
+    if grep -q 'reserved name' "$log"; then
+      echo "crates.io holds $crate on its reserved name list, so this name can never be published." >&2
+      echo "Rename the package, keeping the binary or library name if that is what users type, and" >&2
+      echo "rerun. Everything published so far stays published." >&2
+      return 1
     fi
 
     if ! grep -q '429 Too Many Requests' "$log"; then
