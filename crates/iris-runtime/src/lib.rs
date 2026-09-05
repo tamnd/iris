@@ -177,5 +177,12 @@ pub use iris_trust::{Policy, Resolve, Untrusted};
 /// not have to add a dependency to name the type it is holding.
 pub use iris_format::Digest;
 
+/// What a scan cost, in requests to the source and bytes brought back.
+///
+/// Re-exported for the same reason as [`Digest`]: [`Dataset::last_scan`] and
+/// [`Windowed::last_scan`] hand one back, and a host that only wanted to read a container should
+/// not have to depend on iris-source to name what it was given.
+pub use iris_source::Traffic;
+
 /// The version of this crate, as reported by build metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

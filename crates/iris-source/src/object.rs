@@ -29,7 +29,7 @@ use bytes::Bytes;
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use tokio::runtime::Handle;
 
-use crate::source::{Fetch, RangeSource, SourceError, bounds};
+use crate::source::{Fetch, RangeSource, SourceError, Traffic, bounds};
 
 /// A [`RangeSource`] over one object in an object store.
 #[derive(Debug)]
@@ -115,25 +115,6 @@ impl ObjectSource {
             requests: 0,
             transferred: 0,
         }
-    }
-
-    /// How many requests this source has sent to the store.
-    ///
-    /// Wall clock alone hides the mechanism. Two scans that take the same time can differ by an
-    /// order of magnitude in how many round trips they made, and this is the number that says
-    /// which one was lucky.
-    #[must_use]
-    pub fn requests(&self) -> u64 {
-        self.requests
-    }
-
-    /// How many bytes have arrived from the store.
-    ///
-    /// Counted on arrival rather than on request, so a fetch that failed does not appear as traffic
-    /// that never happened.
-    #[must_use]
-    pub fn transferred(&self) -> u64 {
-        self.transferred
     }
 
     /// The path this source reads.
@@ -250,6 +231,18 @@ impl RangeSource for ObjectSource {
         // own length, which is a usize.
         let offset = usize::try_from(at - held.at).unwrap_or(usize::MAX);
         Ok(Fetch::Ready(&held.bytes[offset..offset + len]))
+    }
+
+    fn traffic(&self) -> Traffic {
+        // Requests are counted when they are sent and bytes when they arrive, which is why the two
+        // are not always in step. A fetch that is in flight has already cost a round trip and has
+        // not yet brought anything back, and a fetch that failed cost the round trip and never
+        // will. Counting bytes on arrival is what keeps a failure from appearing as traffic that
+        // did not happen.
+        Traffic {
+            requests: self.requests,
+            bytes: self.transferred,
+        }
     }
 }
 

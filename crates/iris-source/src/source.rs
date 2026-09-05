@@ -23,7 +23,7 @@
 //!
 //! # What an implementation has to promise
 //!
-//! Four things, and the conformance suite checks all of them.
+//! Five things, and the conformance suite checks all of them.
 //!
 //! **Bounds are an error, not a short read.** A range that runs past the end comes back as
 //! [`SourceError::OutOfBounds`] rather than as the bytes that happen to exist. A decoder that asked
@@ -42,16 +42,20 @@
 //! before it. A source is allowed to be much slower when the order is unhelpful, and it is not
 //! allowed to be wrong.
 //!
+//! **Counters only go up.** [`RangeSource::traffic`] reports what the source has done since it was
+//! opened, and it never reports less than it did a moment ago. A host measuring one scan takes the
+//! difference across it, and a counter that can go backwards makes that difference meaningless.
+//!
 //! Nothing here says a source has to remember more than one range. A windowed file keeps whatever
 //! its current view covers, an object source keeps its last block, and a memory source keeps
 //! everything. All three satisfy the four promises above, which is what makes them substitutable.
 //!
 //! # Writing a fourth
 //!
-//! Implement [`len`](RangeSource::len) and [`range`](RangeSource::range), override
-//! [`largest`](RangeSource::largest) if a single call cannot serve an arbitrarily long range, and
-//! run it through [`crate::conformance`] with the `conformance` feature on. If the suite passes, the
-//! rest of iris will drive it.
+//! Implement [`len`](RangeSource::len), [`range`](RangeSource::range) and
+//! [`traffic`](RangeSource::traffic), override [`largest`](RangeSource::largest) if a single call
+//! cannot serve an arbitrarily long range, and run it through [`crate::conformance`] with the
+//! `conformance` feature on. If the suite passes, the rest of iris will drive it.
 
 use std::io;
 
@@ -144,9 +148,56 @@ pub enum SourceError {
     },
 }
 
+/// What a source has done to serve the ranges it has been asked for.
+///
+/// Wall clock hides the mechanism. Two scans that take the same time can differ by an order of
+/// magnitude in how many round trips they made and how many bytes came back, and a design whose
+/// central claim is that declaring ranges moves fewer bytes has to be able to show that directly
+/// rather than leave it to be inferred from a duration.
+///
+/// Both counters run from when the source was opened and only ever go up, so what one scan cost is
+/// the difference across it. [`Traffic::since`] is that subtraction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Traffic {
+    /// How many times the source went to whatever is underneath it.
+    ///
+    /// One request over the network, one window slide, one read. A range served out of something
+    /// the source was already holding costs nothing and is not counted, which is the whole reason
+    /// for counting.
+    pub requests: u64,
+
+    /// How many bytes those trips brought within reach.
+    ///
+    /// For a source over a network this is bytes that crossed it. For a mapped file it is the span
+    /// that was mapped, which is what the host asked the kernel to make addressable rather than
+    /// what the kernel went on to read, because the host has no way to see the second number. So
+    /// the two are comparable as how much the host asked for and not as how much moved.
+    pub bytes: u64,
+}
+
+impl Traffic {
+    /// Nothing fetched and nothing brought across.
+    pub const NONE: Self = Self {
+        requests: 0,
+        bytes: 0,
+    };
+
+    /// What has happened since `earlier`.
+    ///
+    /// Saturating, so a source that broke the promise that counters only go up reports zero here
+    /// rather than a number just short of `u64::MAX` that would read as a catastrophe.
+    #[must_use]
+    pub const fn since(self, earlier: Self) -> Self {
+        Self {
+            requests: self.requests.saturating_sub(earlier.requests),
+            bytes: self.bytes.saturating_sub(earlier.bytes),
+        }
+    }
+}
+
 /// A place a decoder's byte ranges come from.
 ///
-/// See the [module documentation](self) for the four promises an implementation makes and for how
+/// See the [module documentation](self) for the five promises an implementation makes and for how
 /// to write one.
 pub trait RangeSource {
     /// How many bytes the source holds.
@@ -177,6 +228,15 @@ pub trait RangeSource {
     /// [`SourceError::OutOfBounds`] if the range leaves the source, [`SourceError::TooLarge`] if no
     /// single call could cover it, and an implementation specific error if the fetch itself failed.
     fn range(&mut self, at: u64, len: usize) -> Result<Fetch<'_>, SourceError>;
+
+    /// What this source has done since it was opened.
+    ///
+    /// Required rather than defaulted, which is a deliberate cost imposed on anyone writing a
+    /// fourth implementation. A default would have to be zero, an implementation that never thought
+    /// about the question would report zero, and zero is also the honest answer from a source that
+    /// really did fetch nothing. Those two would then be indistinguishable at precisely the moment
+    /// somebody is trying to find out where the bytes went.
+    fn traffic(&self) -> Traffic;
 }
 
 /// Asks for a range and waits until it arrives.

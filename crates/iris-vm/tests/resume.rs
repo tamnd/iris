@@ -25,7 +25,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use iris_source::{Fetch, RangeSource, SourceError, bounds};
+use iris_source::{Fetch, RangeSource, SourceError, Traffic, bounds};
 use iris_vm::{Decoder, Error, Progress, Vm};
 
 /// How many eight byte values the decoder reads, one range each.
@@ -140,6 +140,8 @@ struct Reluctant {
     asked: Option<(u64, usize)>,
     /// Every refusal this source has made, readable after it has been handed to a decoder.
     refusals: Arc<AtomicU64>,
+    /// What it has served, counted the way a source over a network would count it.
+    served: Traffic,
 }
 
 impl Reluctant {
@@ -151,6 +153,7 @@ impl Reluctant {
             left: 0,
             asked: None,
             refusals: Arc::clone(&refusals),
+            served: Traffic::NONE,
         };
         (source, refusals)
     }
@@ -175,8 +178,17 @@ impl RangeSource for Reluctant {
             return Ok(Fetch::Pending);
         }
 
+        self.served.requests += 1;
+        self.served.bytes += len as u64;
         let start = at as usize;
         Ok(Fetch::Ready(&self.bytes[start..start + len]))
+    }
+
+    fn traffic(&self) -> Traffic {
+        // Counted when the range is served rather than when it is asked for, which is what a real
+        // source does: the refusals above are this source saying the bytes are not here yet, and
+        // nothing has crossed anything at that point.
+        self.served
     }
 }
 

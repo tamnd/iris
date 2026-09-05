@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use arrow_array::RecordBatch;
 use iris_format::{Directory, Placement, SectionKind};
-use iris_runtime::Runtime;
+use iris_runtime::{Runtime, Traffic};
 use iris_source::{FileSource, RangeSource};
 
 mod support;
@@ -49,6 +49,16 @@ const WINDOW: usize = 256 * 1024 * 1024;
 
 /// Where this gate keeps its fixtures, which the fleet workflow removes after a run that failed.
 const SCRATCH: &str = "gate-window";
+
+/// Rows in the fixture the traffic test reads, which is sixteen megabytes of data section.
+///
+/// Large enough that a scan of all of it cannot fit in the window below and a scan of fifty rows
+/// comfortably can, which is the difference that test is about. Small enough to write and read in
+/// well under a second.
+const TRAFFIC_ROWS: u64 = 1_000_000;
+
+/// The window the traffic fixture is read through, which is a quarter of its data section.
+const TRAFFIC_WINDOW: usize = 4 * 1024 * 1024;
 
 /// Where the data section starts, read out of the file with nothing but `std`.
 ///
@@ -266,4 +276,87 @@ fn a_dataset_larger_than_four_gibibytes_reads_through_a_window_a_fraction_of_its
             );
         }
     }
+}
+
+/// A scan says how many times it went to the source and how many bytes that brought within reach.
+///
+/// The claim M4 makes is that declaring ranges moves fewer bytes, and wall clock cannot show that:
+/// on a warm page cache a scan that read a fiftieth of a file and a scan that read all of it are
+/// close enough to be indistinguishable. So the numbers are reported directly, and this is the test
+/// that they are the scan's numbers and not the source's running total.
+///
+/// The two scans run in this order on purpose. The whole file first and the fifty rows second, so
+/// that a counter which was accidentally cumulative would make the second pair larger than the
+/// first rather than smaller, and every assertion below would fail rather than pass by luck.
+#[test]
+fn a_scan_reports_what_it_asked_the_source_for() {
+    let builder = builder(TRAFFIC_ROWS, COLUMNS);
+    let resident = builder.build().expect("a container this size still fits");
+    let (scratch, _) = write_container(SCRATCH, "traffic", &builder);
+
+    let runtime = Runtime::new()
+        .expect("the engine builds")
+        .with_max_batch_rows(BATCH_ROWS);
+
+    let file = File::open(&scratch.0).expect("the fixture opens");
+    let source = FileSource::with_span(file, TRAFFIC_WINDOW).expect("a window over the fixture");
+    let mut windowed = runtime
+        .open_windowed(Box::new(source))
+        .expect("the container opens through a window");
+
+    // Opening read a trailer, a header, a footer and a decoder module, all of which cost the source
+    // something. None of it is a scan, and none of it should be here.
+    assert_eq!(
+        windowed.last_scan(),
+        Traffic::NONE,
+        "a dataset that has not been scanned has no scan to report"
+    );
+    let opening = windowed.traffic();
+    assert!(
+        opening.requests > 0,
+        "opening a container through a window has to have gone to the source at least once"
+    );
+
+    windowed.scan().expect("the decoder runs");
+    let whole = windowed.last_scan();
+    assert!(
+        whole.requests > 1,
+        "a sixteen megabyte scan through a four megabyte window slid {} times",
+        whole.requests
+    );
+
+    windowed.scan_rows(100, 50).expect("the decoder runs");
+    let part = windowed.last_scan();
+    assert!(
+        part.requests > 0 && part.requests < whole.requests,
+        "fifty rows cost {} requests and the whole file cost {}",
+        part.requests,
+        whole.requests
+    );
+    assert!(
+        part.bytes < whole.bytes,
+        "fifty rows brought {} bytes within reach and the whole file brought {}",
+        part.bytes,
+        whole.bytes
+    );
+
+    // And the running total is the total, which is what the per scan numbers are differences of.
+    let total = windowed.traffic();
+    assert_eq!(
+        total.requests,
+        opening.requests + whole.requests + part.requests,
+        "the total is not the parts added up"
+    );
+    assert_eq!(total.bytes, opening.bytes + whole.bytes + part.bytes);
+
+    // The resident path is the comparison the whole design is arguing against. It reports nothing
+    // per scan because it moved nothing per scan: the entire container was paid for before the
+    // dataset existed, whether or not a scan went on to look at any of it.
+    let dataset = runtime.open(&resident).expect("the container opens");
+    dataset.scan_rows(100, 50).expect("the decoder runs");
+    assert_eq!(
+        dataset.last_scan(),
+        Traffic::NONE,
+        "a scan over bytes that are already here does not fetch anything"
+    );
 }

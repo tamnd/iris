@@ -95,7 +95,7 @@ mod object {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use iris_source::{ObjectSource, RangeSource, conformance, read_blocking};
+    use iris_source::{ObjectSource, RangeSource, Traffic, conformance, read_blocking};
     use object_store::{ObjectStore, ObjectStoreExt as _, memory::InMemory, path::Path};
 
     use super::{CORPUS, corpus};
@@ -158,24 +158,37 @@ mod object {
         let (_runtime, mut source, contents) = source();
 
         read_blocking(&mut source, 0, 64).expect("the bytes arrive");
-        assert_eq!(source.requests(), 1, "one range is one request");
-        assert_eq!(source.transferred(), 64, "and sixty four bytes of traffic");
+        assert_eq!(
+            source.traffic(),
+            Traffic {
+                requests: 1,
+                bytes: 64
+            },
+            "one range is one request and sixty four bytes"
+        );
 
         // A range inside the block already held costs nothing, which is the only reason keeping a
         // block is worth doing at all.
         read_blocking(&mut source, 8, 8).expect("already held");
         assert_eq!(
-            source.requests(),
-            1,
+            source.traffic(),
+            Traffic {
+                requests: 1,
+                bytes: 64
+            },
             "a range inside the held block is free"
         );
-        assert_eq!(source.transferred(), 64);
 
         // One outside it costs a request.
         let far = contents.len() as u64 - 32;
         read_blocking(&mut source, far, 32).expect("the tail arrives");
-        assert_eq!(source.requests(), 2);
-        assert_eq!(source.transferred(), 96);
+        assert_eq!(
+            source.traffic(),
+            Traffic {
+                requests: 2,
+                bytes: 96
+            }
+        );
     }
 
     #[test]
@@ -185,8 +198,8 @@ mod object {
         let bytes = read_blocking(&mut source, contents.len() as u64, 0).expect("empty is fine");
         assert!(bytes.is_empty());
         assert_eq!(
-            source.requests(),
-            0,
+            source.traffic(),
+            Traffic::NONE,
             "no bytes wanted is no round trip worth making"
         );
     }

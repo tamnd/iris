@@ -35,7 +35,7 @@ pub mod source;
 
 pub use memory::MemorySource;
 pub use segment::Segment;
-pub use source::{Fetch, RangeSource, SourceError, bounds, read_blocking};
+pub use source::{Fetch, RangeSource, SourceError, Traffic, bounds, read_blocking};
 
 #[cfg(feature = "conformance")]
 pub mod conformance;

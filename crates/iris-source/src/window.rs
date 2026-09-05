@@ -146,6 +146,7 @@ pub struct Window {
     len: u64,
     view: Option<View>,
     slides: u64,
+    mapped_bytes: u64,
 }
 
 impl Window {
@@ -202,6 +203,7 @@ impl Window {
             len,
             view: None,
             slides: 0,
+            mapped_bytes: 0,
         })
     }
 
@@ -237,6 +239,18 @@ impl Window {
     #[must_use]
     pub fn slides(&self) -> u64 {
         self.slides
+    }
+
+    /// How many bytes the views have covered between them, added up over every slide.
+    ///
+    /// This is address space that was made readable and not bytes that were read. A view is rounded
+    /// out to alignment at both ends and runs to the end of the span whether or not anything asks
+    /// for the far end of it, and what the kernel then faults in is its own business and is not
+    /// visible from here. So it is an upper bound on what a scan touched, and it is the number that
+    /// compares with the bytes a source over a network actually pulled across.
+    #[must_use]
+    pub fn mapped_bytes(&self) -> u64 {
+        self.mapped_bytes
     }
 
     /// The bytes of the file from `at`, `len` of them.
@@ -363,6 +377,7 @@ impl Window {
             len: view_len as u64,
         });
         self.slides += 1;
+        self.mapped_bytes += view_len as u64;
         Ok(())
     }
 

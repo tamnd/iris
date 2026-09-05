@@ -11,7 +11,7 @@ use iris_abi::{
 };
 use iris_format::layout::HEADER_SIZE;
 use iris_format::{Container, Digest, Directory, Placement, SchemaEncoding, Section, SectionKind};
-use iris_source::{RangeSource, Segment, read_blocking};
+use iris_source::{RangeSource, Segment, Traffic, read_blocking};
 use iris_trust::{Policy, Verified};
 use iris_vm::{Decoder, Program, Vm};
 
@@ -226,6 +226,7 @@ impl Runtime {
             name: opened.name,
             digest: opened.digest,
             max_batch_rows: self.max_batch_rows,
+            last_scan: Traffic::NONE,
         })
     }
 
@@ -376,6 +377,19 @@ impl Dataset<'_> {
         self.digest
     }
 
+    /// What the last scan cost, which on this path is nothing.
+    ///
+    /// Always zero, and that is the point rather than an omission. The bytes were already resident
+    /// before this dataset existed: whoever produced the buffer paid for it, in full, whether or
+    /// not the scan went on to read a hundredth of it. A windowed dataset reports a real pair of
+    /// numbers here, and the comparison between the two is the whole argument for declaring ranges.
+    ///
+    /// See [`Windowed::last_scan`].
+    #[must_use]
+    pub const fn last_scan(&self) -> Traffic {
+        Traffic::NONE
+    }
+
     /// Reads every row.
     ///
     /// # Errors
@@ -432,6 +446,7 @@ pub struct Windowed {
     name: String,
     digest: Digest,
     max_batch_rows: u64,
+    last_scan: Traffic,
 }
 
 /// Written out rather than derived, because a source is not required to be printable and requiring
@@ -445,6 +460,7 @@ impl std::fmt::Debug for Windowed {
             .field("window_bytes", &self.window_bytes)
             .field("source_bytes", &self.source_bytes)
             .field("max_batch_rows", &self.max_batch_rows)
+            .field("last_scan", &self.last_scan)
             .field("attached", &self.source.is_some())
             .finish_non_exhaustive()
     }
@@ -496,6 +512,35 @@ impl Windowed {
         self.digest
     }
 
+    /// What the last scan cost, in requests to the source and bytes brought back.
+    ///
+    /// Wall clock hides the mechanism. A scan that declared four ranges and one that read the file
+    /// end to end can take the same time on a warm page cache and are not the same thing at all,
+    /// and the difference only shows up on a machine where the bytes are somewhere else. This is
+    /// the pair of numbers that says which one happened.
+    ///
+    /// It covers the scan and nothing else. Opening a dataset reads a trailer, a header, a footer
+    /// and the decoder module, and that traffic belongs to opening. Before any scan has run this
+    /// is zero. See [`Windowed::traffic`] for the total since the source was opened.
+    #[must_use]
+    pub const fn last_scan(&self) -> Traffic {
+        self.last_scan
+    }
+
+    /// What the source has done since it was opened, including opening it.
+    ///
+    /// The counters underneath only ever go up, so a caller measuring something other than one
+    /// scan takes a reading either side of it and subtracts. That is what [`Traffic::since`] is
+    /// for, and it is what [`Windowed::last_scan`] does internally.
+    ///
+    /// Zero if the source is not attached, which happens only if a scan panicked while it held it.
+    #[must_use]
+    pub fn traffic(&self) -> Traffic {
+        self.source
+            .as_ref()
+            .map_or(Traffic::NONE, RangeSource::traffic)
+    }
+
     /// Reads every row.
     ///
     /// # Errors
@@ -518,9 +563,21 @@ impl Windowed {
         // the decoder asks for goes out through `require_range`. The source comes back afterwards
         // whether or not the scan worked, because a failed scan is not a reason to lose the file.
         let source = self.source.take().ok_or(Error::SourceLost)?;
+
+        // Read before the source goes into the guest and again after it comes back, so what is
+        // recorded is this scan and not everything since the file was opened. Opening read a
+        // trailer, a header, a footer and a decoder module, and a caller asking what a scan cost
+        // should not be handed the cost of getting to the point where a scan was possible.
+        let before = source.traffic();
         decoder.attach(source);
         let outcome = run(&mut decoder, &self.hello(), &self.schema, start, count);
         self.source = decoder.detach();
+
+        // Recorded whether or not the scan worked. A scan that failed part way through still moved
+        // whatever it moved, and that is the number somebody looking at the failure wants.
+        if let Some(source) = self.source.as_ref() {
+            self.last_scan = source.traffic().since(before);
+        }
         outcome
     }
 

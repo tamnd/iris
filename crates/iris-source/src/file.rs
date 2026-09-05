@@ -13,7 +13,7 @@
 use std::fs::File;
 use std::path::Path;
 
-use crate::source::{Fetch, RangeSource, SourceError};
+use crate::source::{Fetch, RangeSource, SourceError, Traffic};
 use crate::sys;
 use crate::window::{Window, WindowError};
 
@@ -90,6 +90,16 @@ impl RangeSource for FileSource {
 
     fn range(&mut self, at: u64, len: usize) -> Result<Fetch<'_>, SourceError> {
         Ok(Fetch::Ready(self.window.range(at, len)?))
+    }
+
+    fn traffic(&self) -> Traffic {
+        // A slide is this source's request: it is the moment the host goes to the operating system
+        // and asks for a different part of the file to be reachable. Everything between two slides
+        // is served out of the view that is already there and costs a comparison.
+        Traffic {
+            requests: self.window.slides(),
+            bytes: self.window.mapped_bytes(),
+        }
     }
 }
 

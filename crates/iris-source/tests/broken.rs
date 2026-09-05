@@ -15,7 +15,7 @@
 
 use std::panic::AssertUnwindSafe;
 
-use iris_source::{Fetch, RangeSource, SourceError, bounds, conformance};
+use iris_source::{Fetch, RangeSource, SourceError, Traffic, bounds, conformance};
 
 const CORPUS: usize = 40_000;
 
@@ -69,6 +69,10 @@ impl RangeSource for NeverGoesBack {
         let start = (self.furthest as usize).min(self.bytes.len() - len);
         Ok(Fetch::Ready(&self.bytes[start..start + len]))
     }
+
+    fn traffic(&self) -> Traffic {
+        Traffic::NONE
+    }
 }
 
 /// A source that says a range is ready and then says it is not.
@@ -95,6 +99,10 @@ impl RangeSource for Flapper {
         let start = at as usize;
         Ok(Fetch::Ready(&self.bytes[start..start + len]))
     }
+
+    fn traffic(&self) -> Traffic {
+        Traffic::NONE
+    }
 }
 
 /// A source that serves what it has instead of refusing what it does not.
@@ -115,6 +123,43 @@ impl RangeSource for Lenient {
         let start = (at as usize).min(self.bytes.len());
         let end = start.saturating_add(len).min(self.bytes.len());
         Ok(Fetch::Ready(&self.bytes[start..end]))
+    }
+
+    fn traffic(&self) -> Traffic {
+        Traffic::NONE
+    }
+}
+
+/// A source that counts what each range cost rather than what every range has cost.
+///
+/// The natural mistake, and the reason the trait says what it says instead of leaving it to
+/// whoever writes the fourth implementation. Reporting the last request is a perfectly sensible
+/// thing for a source to want to say, and it is not what a host is asking. A host takes a reading
+/// before a scan and a reading after it and subtracts, and against this source that subtraction
+/// comes out as zero or as nonsense depending on which way the last two requests happened to fall.
+struct Forgetful {
+    bytes: Vec<u8>,
+    last: u64,
+}
+
+impl RangeSource for Forgetful {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn range(&mut self, at: u64, len: usize) -> Result<Fetch<'_>, SourceError> {
+        bounds(at, len, self.len())?;
+        // The bug, and it is one character: assignment where the real one accumulates.
+        self.last = len as u64;
+        let start = at as usize;
+        Ok(Fetch::Ready(&self.bytes[start..start + len]))
+    }
+
+    fn traffic(&self) -> Traffic {
+        Traffic {
+            requests: 1,
+            bytes: self.last,
+        }
     }
 }
 
@@ -156,5 +201,19 @@ fn a_source_that_serves_a_short_read_instead_of_refusing_is_rejected() {
     assert!(
         complaint.contains("out of bounds"),
         "the suite should have named the bounds promise, and said: {complaint}"
+    );
+}
+
+#[test]
+fn a_source_whose_counters_go_backwards_is_rejected() {
+    let contents = corpus();
+    let mut source = Forgetful {
+        bytes: contents.clone(),
+        last: 0,
+    };
+    let complaint = rejected(&mut source, &contents);
+    assert!(
+        complaint.contains("traffic"),
+        "the suite should have named the traffic promise, and said: {complaint}"
     );
 }
