@@ -44,10 +44,22 @@ fn handles() -> Option<u32> {
 
 /// The byte this file holds at `offset`.
 ///
-/// Two multipliers of different periods, so the pattern does not repeat within any window and a byte
-/// copied from a page boundary elsewhere in the file does not happen to match.
+/// This is splitmix64's finaliser, which is an avalanche mix: every output bit depends on every
+/// input bit, so two offsets a power of two apart produce unrelated bytes.
+///
+/// The first version of this was two multipliers and a shift, and it repeated every sixty four
+/// kibibytes, because the shifted term only kept bits that depend on the offset modulo two to the
+/// sixteen. Every view starts on a multiple of the allocation granularity, which on Windows is
+/// exactly sixty four kibibytes, so the bytes at the start of one view were identical to the bytes
+/// at the start of every other view. The assertion that the front of the reservation no longer holds
+/// the bytes from before a slide could not distinguish a correct remap from no remap at all, and
+/// Windows is where it was caught, because that is the platform whose granularity lines up with the
+/// period. A test pattern needs a mixer, not an arithmetic sequence.
 fn pattern(offset: u64) -> u8 {
-    ((offset.wrapping_mul(31) ^ offset.wrapping_mul(2_654_435_761) >> 7) & 0xff) as u8
+    let mut mixed = offset.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    ((mixed ^ (mixed >> 31)) & 0xff) as u8
 }
 
 /// A temporary file of `len` bytes filled with [`pattern`], and the handle to read it back.

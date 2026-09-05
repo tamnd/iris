@@ -84,10 +84,14 @@ fn last_error() -> io::Error {
 /// no backing at all: `CreateFileMappingW` refuses a zero length one, and there is nothing to map.
 pub(crate) struct Backing {
     section: HANDLE,
+    /// How large the section is, which is the size of the file it was made from. A view may not run
+    /// past this, so the last view of a file has to be cut back to it.
+    len: u64,
 }
 
 impl Backing {
     pub(crate) fn new(file: &File) -> io::Result<Self> {
+        let len = file.metadata()?.len();
         let handle: HANDLE = file.as_raw_handle().cast();
         // SAFETY: the handle belongs to a file this call borrows for its whole duration. Null
         // security attributes and a null name are the documented way to ask for an unnamed section
@@ -97,7 +101,7 @@ impl Backing {
         if section.is_null() {
             return Err(last_error());
         }
-        Ok(Self { section })
+        Ok(Self { section, len })
     }
 }
 
@@ -115,6 +119,7 @@ impl fmt::Debug for Backing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Backing")
             .field("section", &self.section)
+            .field("len", &self.len)
             .finish()
     }
 }
@@ -192,6 +197,20 @@ impl Reservation {
             }
         }
 
+        // How many bytes of the section there actually are from here on. A view may not run past the
+        // end of the section, and a section is exactly as long as the file, so the last view of a
+        // file whose length is not a multiple of the page size asks for more than there is. Windows
+        // answers that with ERROR_ACCESS_DENIED, which reads like a permissions problem and is not
+        // one. Unix has nothing to say about this, because mmap rounds a length up itself and the
+        // bytes in the last page past the end of the file read as zero.
+        //
+        // The placeholder is still split at the rounded up length and the view still occupies that
+        // many pages of address space. It is only the number handed to this call that comes down,
+        // which is what keeps MEM_REPLACE_PLACEHOLDER's "exactly the placeholder" rule satisfied:
+        // the view rounds back up to the same number of pages.
+        let remaining = backing.len.saturating_sub(offset);
+        let view_len = usize::try_from(remaining).unwrap_or(usize::MAX).min(len);
+
         // SAFETY: the base is a placeholder of exactly len bytes, which is what MEM_REPLACE_PLACEHOLDER
         // requires, and the section outlives the view because the caller holds the backing for at
         // least as long as this reservation. No extended parameters.
@@ -201,7 +220,7 @@ impl Reservation {
                 current_process(),
                 self.base.as_ptr().cast::<c_void>(),
                 offset,
-                len,
+                view_len,
                 MEM_REPLACE_PLACEHOLDER,
                 PAGE_READONLY,
                 ptr::null_mut(),

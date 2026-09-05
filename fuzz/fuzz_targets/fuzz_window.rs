@@ -40,11 +40,20 @@ const FILE_LEN: u64 = 4 << 20;
 
 /// The byte the sample file holds at `offset`.
 ///
+/// splitmix64's finaliser, so every output bit depends on every input bit and two offsets a power of
+/// two apart produce unrelated bytes. That matters here for the same reason it matters in the
+/// integration test: every view starts on an alignment boundary, so a pattern with a period that is
+/// a power of two makes the start of one view identical to the start of every other one, and a stale
+/// read stops being detectable.
+///
 /// The same function the integration test uses, deliberately duplicated rather than shared. The fuzz
 /// package is outside the workspace and depends on iris-source as a published surface, and exporting
-/// a test pattern from a library crate to avoid eight lines here would be the wrong trade.
+/// a test pattern from a library crate to avoid six lines here would be the wrong trade.
 fn pattern(offset: u64) -> u8 {
-    ((offset.wrapping_mul(31) ^ offset.wrapping_mul(2_654_435_761) >> 7) & 0xff) as u8
+    let mut mixed = offset.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    ((mixed ^ (mixed >> 31)) & 0xff) as u8
 }
 
 /// The sample file, created on first use and kept for the life of the process.
