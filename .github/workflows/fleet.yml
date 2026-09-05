@@ -21,6 +21,11 @@ on:
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
+    inputs:
+      sweep:
+        description: "Also measure whether the windowed scan cost is reproducible across window sizes"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -151,6 +156,43 @@ jobs:
       - name: Show it
         shell: pwsh
         run: Get-Content probe-${{ matrix.name }}.json
+
+      # Only when a dispatch asks for it. It is two dozen more runs of a job that already takes five
+      # minutes, and the answer only moves when the probe or the scan crate does.
+      #
+      # The run above says what the windowed shape costs at one window size, with a confidence
+      # interval taken from the samples inside that run. That interval is the wrong one to judge the
+      # result by. The flat scan and the windowed scan are measured one after the other, so anything
+      # that moves the machine between the two blocks lands entirely in the difference, and an
+      # interval computed inside a block cannot see it. On this machine the flat scan alone comes out
+      # anywhere in a five percent band across runs minutes apart, which is the same size as the
+      # effect being judged. So the question of whether the windowed shape really costs anything
+      # needs repeats of the whole run, not more samples inside one.
+      #
+      # Four window sizes, because the single pass sweep this replaced put the largest overhead at 16
+      # and 32 MiB with both shoulders near zero, and either that shape is real or it is the run to
+      # run spread. The repeats are interleaved rather than blocked, so that a machine that drifts
+      # over the quarter hour this takes spreads that drift across all four sizes instead of handing
+      # it to whichever size was measured while the drift happened.
+      - name: Whether the window cost is reproducible
+        if: inputs.sweep
+        shell: pwsh
+        run: |
+          foreach ($rep in 1..6) {
+            foreach ($w in 4, 16, 32, 128) {
+              $out = "sweep-$w-$rep-${{ matrix.name }}.json"
+              cargo run --release --locked -q -p iris-vm --example m0_probe -- --json --samples 25 --mib 256 --window-mib $w > $out
+              Get-Content $out
+            }
+          }
+
+      - uses: actions/upload-artifact@v7
+        if: inputs.sweep
+        with:
+          name: sweep-${{ matrix.name }}
+          path: sweep-*-*-${{ matrix.name }}.json
+          retention-days: 30
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
         with:
