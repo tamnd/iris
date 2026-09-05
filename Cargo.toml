@@ -42,7 +42,11 @@ half = "2.7.1"
 indexmap = "2.14.1"
 libc = "0.2.189"
 memmap2 = "0.9.11"
-object_store = "0.14.1"
+# Default features off, which drops the local filesystem store and the async runtime it pulls with
+# it. iris reads local files through its own window rather than through an object store, so the only
+# thing wanted here is the trait, the in memory store the conformance suite runs against, and later
+# the cloud backends a member crate asks for by name.
+object_store = { version = "0.14.1", default-features = false }
 parking_lot = "0.12.5"
 rustc-hash = "2.1.3"
 serde = { version = "1.0.229", features = ["derive"] }
