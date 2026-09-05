@@ -16,13 +16,24 @@
 //! is what removes the four gibibyte ceiling and what makes object storage reachable, and the claim
 //! being tested is that supporting remote storage does not tax the local path.
 //!
+//! Measurement two is taken twice, in two shapes. One is a module written by hand in `wat`, which
+//! addresses every load as a base plus an index because that is how a person writes a chunked loop,
+//! against a flat loop that addresses each load with a single register. The other is
+//! `crates/m0-scan`, compiled to wasm32 by the toolchain a decoder is written with, where both loops
+//! go through the same summing function and the compiler chooses how to express them. The first run
+//! of this probe reported only the hand written pair and split along architecture, and there was no
+//! way to tell how much of the split was the design and how much was the way the probe wrote it
+//! down. Two shapes reported side by side is the answer to that, and where they disagree the
+//! disagreement is the result.
+//!
 //! Both are reported as a median with a bootstrap confidence interval and a sample size, because a
 //! bare mean of a timing distribution is not a number anyone should act on.
 
 use std::env;
 use std::fs::File;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -36,6 +47,18 @@ const HOSTCALL_GATE_NS: f64 = 100.0;
 
 /// Fraction of the flat scan above which windowing is taxing the local path.
 const WINDOW_GATE: f64 = 0.03;
+
+/// Which of the two windowed shapes the gate is judged against.
+///
+/// The compiled one, because it is the shape a decoder has. A decoder is Rust compiled to wasm32 by
+/// a toolchain that decides for itself how to address a load, and a gate applied to a loop nobody
+/// will ever run is a gate on the probe.
+///
+/// Worth being plain about the order this was decided in, since picking the more flattering of two
+/// numbers after seeing both is exactly how a gate stops meaning anything. The argument above is the
+/// one in issue #66, written before either number existed, and the gate itself does not move: three
+/// percent is still three percent, and both shapes are reported either way.
+const JUDGED: Shape = Shape::Compiled;
 
 /// A loop that calls an imported host function, and the same loop without the call.
 ///
@@ -112,6 +135,43 @@ const SCAN_WAT: &str = r#"
 )
 "#;
 
+/// Which of the two windowed shapes a measurement is of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// The pair of loops written by hand in `wat`, above.
+    HandWritten,
+    /// The pair of loops in `crates/m0-scan`, compiled to wasm32 from Rust.
+    Compiled,
+}
+
+impl Shape {
+    /// What the shape is called in the output.
+    fn label(self) -> &'static str {
+        match self {
+            Self::HandWritten => "hand written wat",
+            Self::Compiled => "compiled from Rust",
+        }
+    }
+
+    /// The key the shape appears under in the machine readable form.
+    fn key(self) -> &'static str {
+        match self {
+            Self::HandWritten => "wat",
+            Self::Compiled => "rust",
+        }
+    }
+
+    /// What the module calls its exported memory.
+    ///
+    /// The hand written module names it, and a Rust `cdylib` gets `memory` from the linker.
+    fn memory_export(self) -> &'static str {
+        match self {
+            Self::HandWritten => "mem",
+            Self::Compiled => "memory",
+        }
+    }
+}
+
 /// Everything the host side of the probe needs in order to answer a call.
 struct ProbeState {
     calls: u64,
@@ -121,6 +181,12 @@ struct ProbeState {
     source: Arc<[u8]>,
     window: usize,
     refill: bool,
+    /// Where in linear memory the bytes being scanned start.
+    ///
+    /// Zero for the hand written module, which owns its whole memory and is handed the bytes at the
+    /// bottom of it. The compiled module allocates its buffer through Rust, so the bottom of its
+    /// memory belongs to the data section and the stack, and it has to say where the buffer went.
+    base: usize,
 }
 
 impl ProbeState {
@@ -133,6 +199,7 @@ impl ProbeState {
             source: Arc::from(Vec::new()),
             window: 0,
             refill: false,
+            base: 0,
         }
     }
 }
@@ -343,7 +410,70 @@ fn resident_source(bytes: usize) -> wasmtime::Result<(Arc<[u8]>, PathBuf)> {
     Ok((Arc::from(data), path))
 }
 
+/// Compiles `crates/m0-scan` for wasm32 and hands back the module bytes.
+///
+/// Built here rather than checked in, for the reason the gate test gives at more length: a committed
+/// `.wasm` is a binary nobody reads, produced by a toolchain nobody remembers, that keeps being
+/// measured after the source it came from has stopped matching it. A probe whose numbers describe a
+/// loop that is no longer in the tree is worse than no probe.
+///
+/// The nested cargo gets its own target directory, because cargo's lock is per target directory and
+/// building into the one the outer cargo holds would deadlock rather than fail.
+fn compiled_scan() -> wasmtime::Result<Vec<u8>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()?;
+    let target_dir = root.join("target").join("m0-scan");
+
+    let mut cargo = Command::new(env!("CARGO"));
+    cargo
+        .current_dir(&root)
+        .args([
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "m0-scan",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--target-dir",
+        ])
+        .arg(&target_dir);
+
+    // The flags the probe is being built under are not the flags this build wants. Anything that
+    // instruments the binary would land in the thing being timed, and nothing that targets a machine
+    // with an operating system under it applies to wasm32 anyway.
+    for leaked in [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_BUILD_RUSTFLAGS",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "LLVM_PROFILE_FILE",
+    ] {
+        cargo.env_remove(leaked);
+    }
+
+    let out = cargo.output()?;
+    if !out.status.success() {
+        wasmtime::bail!(
+            "building m0-scan for wasm32 failed. If the target is missing, run\n  \
+             rustup target add wasm32-unknown-unknown\n\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let path = target_dir
+        .join("wasm32-unknown-unknown")
+        .join("release")
+        .join("m0_scan.wasm");
+    Ok(std::fs::read(&path)?)
+}
+
 struct WindowResult {
+    /// Which shape produced these numbers.
+    shape: Shape,
     flat: Summary,
     windowed: Summary,
     refill: Summary,
@@ -353,17 +483,23 @@ struct WindowResult {
     window: usize,
 }
 
-fn measure_window(
+/// Builds one scan shape, gives it somewhere to put the bytes, and puts them there.
+///
+/// Everything up to the point where the two shapes stop differing. What comes back is ready to be
+/// timed and knows nothing about how the timing works.
+fn build_scan(
     engine: &Engine,
-    bytes: usize,
+    shape: Shape,
+    source: &Arc<[u8]>,
     window: usize,
-    samples: usize,
-) -> wasmtime::Result<WindowResult> {
-    let (source, path) = resident_source(bytes)?;
-
-    let module = Module::new(engine, SCAN_WAT)?;
+) -> wasmtime::Result<(Store<ProbeState>, Instance)> {
+    let bytes = source.len();
+    let module = match shape {
+        Shape::HandWritten => Module::new(engine, SCAN_WAT)?,
+        Shape::Compiled => Module::new(engine, &compiled_scan()?)?,
+    };
     let mut store = Store::new(engine, ProbeState::new());
-    store.data_mut().source = Arc::clone(&source);
+    store.data_mut().source = Arc::clone(source);
     store.data_mut().window = window;
 
     let mut linker = Linker::new(engine);
@@ -380,6 +516,7 @@ fn measure_window(
             let Some(memory) = state.memory else {
                 return 0;
             };
+            let base = state.base;
             let source = Arc::clone(&state.source);
             let offset = usize::try_from(chunk).unwrap_or(0).saturating_mul(window);
             let end = offset.saturating_add(window).min(source.len());
@@ -387,23 +524,56 @@ fn measure_window(
                 return 0;
             }
             let len = end - offset;
-            memory.data_mut(&mut caller)[..len].copy_from_slice(&source[offset..end]);
+            memory.data_mut(&mut caller)[base..base + len].copy_from_slice(&source[offset..end]);
             1
         },
     )?;
 
     let instance = linker.instantiate(&mut store, &module)?;
     let memory = instance
-        .get_memory(&mut store, "mem")
+        .get_memory(&mut store, shape.memory_export())
         .ok_or_else(|| wasmtime::format_err!("the scan module did not export its memory"))?;
 
-    let want_pages = bytes.div_ceil(PAGE);
-    let have_pages = usize::try_from(memory.size(&store)).unwrap_or(0);
-    if want_pages > have_pages {
-        memory.grow(&mut store, u64::try_from(want_pages - have_pages)?)?;
-    }
-    memory.data_mut(&mut store)[..bytes].copy_from_slice(&source);
+    let len = i32::try_from(bytes)?;
+
+    // Where the bytes go. The hand written module owns its whole memory and takes them at the
+    // bottom of it, growing the memory from the host side. The compiled module allocates through
+    // Rust, so it is asked for room and it answers with an address, and the allocation is what grows
+    // the memory.
+    let base = match shape {
+        Shape::HandWritten => {
+            let want_pages = bytes.div_ceil(PAGE);
+            let have_pages = usize::try_from(memory.size(&store)).unwrap_or(0);
+            if want_pages > have_pages {
+                memory.grow(&mut store, u64::try_from(want_pages - have_pages)?)?;
+            }
+            0
+        }
+        Shape::Compiled => {
+            let reserve = instance.get_typed_func::<i32, i32>(&mut store, "reserve")?;
+            let at = reserve.call(&mut store, len)?;
+            if at <= 0 {
+                wasmtime::bail!("the compiled scan module could not make room for {bytes} bytes");
+            }
+            usize::try_from(at)?
+        }
+    };
+
+    memory.data_mut(&mut store)[base..base + bytes].copy_from_slice(source);
     store.data_mut().memory = Some(memory);
+    store.data_mut().base = base;
+    Ok((store, instance))
+}
+
+fn measure_window(
+    engine: &Engine,
+    shape: Shape,
+    bytes: usize,
+    window: usize,
+    samples: usize,
+) -> wasmtime::Result<WindowResult> {
+    let (source, path) = resident_source(bytes)?;
+    let (mut store, instance) = build_scan(engine, shape, &source, window)?;
 
     let len = i32::try_from(bytes)?;
     let win = i32::try_from(window)?;
@@ -468,6 +638,7 @@ fn measure_window(
     let refill_overhead = (refill.median - flat.median) / flat.median;
 
     Ok(WindowResult {
+        shape,
         flat,
         windowed,
         refill,
@@ -490,34 +661,13 @@ fn verdict(pass: bool) -> &'static str {
     if pass { "pass" } else { "FAIL" }
 }
 
-fn human(target: &str, hostcall: &HostcallResult, window: &WindowResult) {
-    let hc = hostcall;
-    println!("iris M0 probe");
-    println!("target {target}");
-    println!();
-    println!("Host call round trip");
+/// One windowed shape, in the human readable form.
+fn human_window(window: &WindowResult) {
     println!(
-        "  loop without a call    {:>8.2} ns per iteration  ({:.2} to {:.2}, n = {})",
-        hc.nop.median, hc.nop.lo, hc.nop.hi, hc.nop.n
-    );
-    println!(
-        "  loop with a bare call  {:>8.2} ns per iteration  ({:.2} to {:.2}, n = {})",
-        hc.plain.median, hc.plain.lo, hc.plain.hi, hc.plain.n
-    );
-    println!(
-        "  loop with a real call  {:>8.2} ns per iteration  ({:.2} to {:.2}, n = {})",
-        hc.resident.median, hc.resident.lo, hc.resident.hi, hc.resident.n
-    );
-    println!("  cost of one host call  {:>8.2} ns", hc.per_call);
-    println!(
-        "  gate is {HOSTCALL_GATE_NS} ns per call: {}",
-        verdict(hc.per_call < HOSTCALL_GATE_NS)
-    );
-    println!();
-    println!(
-        "Sliding window over a resident {} MiB buffer, {} MiB window",
+        "Sliding window over a resident {} MiB buffer, {} MiB window, {}",
         window.bytes >> 20,
-        window.window >> 20
+        window.window >> 20,
+        window.shape.label()
     );
     println!(
         "  flat scan              {:>8.2} ms  ({:.2} to {:.2}, n = {})",
@@ -549,17 +699,60 @@ fn human(target: &str, hostcall: &HostcallResult, window: &WindowResult) {
         window.refill_overhead * 100.0
     );
     println!(
-        "  gate is 3 percent on the abstraction: {}",
-        verdict(window.overhead < WINDOW_GATE)
+        "  gate is 3 percent on the abstraction: {}{}",
+        verdict(window.overhead < WINDOW_GATE),
+        if window.shape == JUDGED {
+            ""
+        } else {
+            "  (reported, not the gate)"
+        }
     );
     println!();
-    println!("Interval half widths as a fraction of the median:");
+}
+
+fn human(target: &str, hostcall: &HostcallResult, windows: &[WindowResult]) {
+    let hc = hostcall;
+    println!("iris M0 probe");
+    println!("target {target}");
+    println!();
+    println!("Host call round trip");
     println!(
-        "  host call {:.4}, flat scan {:.4}, windowed {:.4}",
-        hc.resident.relative_width(),
-        window.flat.relative_width(),
-        window.windowed.relative_width()
+        "  loop without a call    {:>8.2} ns per iteration  ({:.2} to {:.2}, n = {})",
+        hc.nop.median, hc.nop.lo, hc.nop.hi, hc.nop.n
     );
+    println!(
+        "  loop with a bare call  {:>8.2} ns per iteration  ({:.2} to {:.2}, n = {})",
+        hc.plain.median, hc.plain.lo, hc.plain.hi, hc.plain.n
+    );
+    println!(
+        "  loop with a real call  {:>8.2} ns per iteration  ({:.2} to {:.2}, n = {})",
+        hc.resident.median, hc.resident.lo, hc.resident.hi, hc.resident.n
+    );
+    println!("  cost of one host call  {:>8.2} ns", hc.per_call);
+    println!(
+        "  gate is {HOSTCALL_GATE_NS} ns per call: {}",
+        verdict(hc.per_call < HOSTCALL_GATE_NS)
+    );
+    println!();
+    for window in windows {
+        human_window(window);
+    }
+    println!(
+        "The gate is judged against the shape compiled from Rust, because that is the shape a"
+    );
+    println!("decoder has. The hand written one is reported beside it, and where the two disagree");
+    println!("the difference is the cost of how the probe expresses windowing, not of windowing.");
+    println!();
+    println!("Interval half widths as a fraction of the median:");
+    println!("  host call {:.4}", hc.resident.relative_width());
+    for window in windows {
+        println!(
+            "  {} flat scan {:.4}, windowed {:.4}",
+            window.shape.key(),
+            window.flat.relative_width(),
+            window.windowed.relative_width()
+        );
+    }
     println!();
     println!(
         "These numbers are not publishable on their own. Publishing happens in iris-bench, on"
@@ -574,7 +767,25 @@ fn summary_json(label: &str, s: &Summary) -> String {
     )
 }
 
-fn json(target: &str, hostcall: &HostcallResult, window: &WindowResult) {
+fn window_json(window: &WindowResult) -> String {
+    let fields = [
+        format!("\"shape\":\"{}\"", window.shape.key()),
+        summary_json("flat", &window.flat),
+        summary_json("windowed", &window.windowed),
+        summary_json("refill", &window.refill),
+        format!("\"bytes\":{}", window.bytes),
+        format!("\"window_bytes\":{}", window.window),
+        format!("\"abstraction_overhead\":{:.6}", window.overhead),
+        format!("\"refill_overhead\":{:.6}", window.refill_overhead),
+        format!("\"gate_overhead\":{WINDOW_GATE}"),
+        format!("\"judged\":{}", window.shape == JUDGED),
+        format!("\"pass\":{}", window.overhead < WINDOW_GATE),
+    ]
+    .join(",");
+    format!("\"{}\":{{{fields}}}", window.shape.key())
+}
+
+fn json(target: &str, hostcall: &HostcallResult, windows: &[WindowResult]) {
     let hostcall_fields = [
         summary_json("nop", &hostcall.nop),
         summary_json("plain", &hostcall.plain),
@@ -584,21 +795,18 @@ fn json(target: &str, hostcall: &HostcallResult, window: &WindowResult) {
         format!("\"pass\":{}", hostcall.per_call < HOSTCALL_GATE_NS),
     ]
     .join(",");
-    let window_fields = [
-        summary_json("flat", &window.flat),
-        summary_json("windowed", &window.windowed),
-        summary_json("refill", &window.refill),
-        format!("\"bytes\":{}", window.bytes),
-        format!("\"window_bytes\":{}", window.window),
-        format!("\"abstraction_overhead\":{:.6}", window.overhead),
-        format!("\"refill_overhead\":{:.6}", window.refill_overhead),
-        format!("\"gate_overhead\":{WINDOW_GATE}"),
-        format!("\"pass\":{}", window.overhead < WINDOW_GATE),
-    ]
-    .join(",");
+    let shapes = windows
+        .iter()
+        .map(window_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    let judged = windows.iter().find(|w| w.shape == JUDGED);
+    let pass = judged.is_some_and(|w| w.overhead < WINDOW_GATE);
     println!(
-        "{{\"probe\":\"iris-m0\",\"methodology\":1,\"target\":\"{target}\",\
-         \"hostcall\":{{{hostcall_fields}}},\"window\":{{{window_fields}}}}}"
+        "{{\"probe\":\"iris-m0\",\"methodology\":2,\"target\":\"{target}\",\
+         \"hostcall\":{{{hostcall_fields}}},\
+         \"window\":{{\"judged\":\"{}\",\"pass\":{pass},{shapes}}}}}",
+        JUDGED.key()
     );
 }
 
@@ -613,12 +821,25 @@ fn main() -> wasmtime::Result<()> {
 
     let engine = Engine::default();
     let hostcall = measure_hostcall(&engine, iters, samples)?;
-    let window = measure_window(&engine, mib << 20, window_mib << 20, samples)?;
+
+    // Both shapes, every time. Reporting only the one the gate is judged against would leave the
+    // question this probe was extended to answer, which is how much of a result belongs to the
+    // design and how much to the way the probe writes it down, unanswerable again.
+    let mut windows = Vec::new();
+    for shape in [Shape::HandWritten, Shape::Compiled] {
+        windows.push(measure_window(
+            &engine,
+            shape,
+            mib << 20,
+            window_mib << 20,
+            samples,
+        )?);
+    }
 
     if as_json {
-        json(&target, &hostcall, &window);
+        json(&target, &hostcall, &windows);
     } else {
-        human(&target, &hostcall, &window);
+        human(&target, &hostcall, &windows);
     }
     Ok(())
 }

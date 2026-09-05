@@ -48,11 +48,21 @@ Neither branch is taken yet, for two reasons. The first is that both failing row
 
 **What changes.** Three things, and none of them is moving the gate. The gate was written down before the measurement, which is the only order in which a gate means anything, and a gate that moves when it is inconvenient is not a gate.
 
-1. M4 does not start until the x86-64 result has been reproduced on hardware nobody else is using. That is the two Xeon machines and the Ryzen desktop, through iris-bench, against a registered claim. If it reproduces, the abstraction cost is real and the design has to answer it. If it does not, the hosted rows were noise and M4 proceeds as written. That is issue #65.
+1. M4 does not start until the x86-64 result has been reproduced on hardware nobody else is using. Of the machines this project has, one is eligible: the Intel Core i9-13900K. The three AMD EPYC boxes are shared tenancy virtual machines, so they cannot produce a number with a duration in it. The run goes through iris-bench against a registered claim. If it reproduces, the abstraction cost is real and the design has to answer it. If it does not, the hosted rows were noise and M4 proceeds as written. That is issue #65.
 2. The naive refill is already ruled out as an implementation. A host memcpy of the window between chunks costs between a quarter and one and a half times the scan itself, on every machine measured including the ones that pass the abstraction gate. Whatever windowing ships, the bytes do not get copied into guest memory a window at a time. That is a real finding and it is the useful half of the second measurement.
-3. The probe grows a second windowed shape, compiled from Rust rather than written by hand, so that the next run of this measurement separates the cost of the design from the cost of the way the probe expresses it. That is issue #66.
+3. The probe grows a second windowed shape, compiled from Rust rather than written by hand, so that the next run of this measurement separates the cost of the design from the cost of the way the probe expresses it. That is issue #66, and it is done. The next section is what it found.
 
 The numbers above go into iris-bench and get attached to claim identifiers once the reproduction machinery in B3 exists. Until then they live here, in the document that has to justify them.
+
+### The second shape
+
+The probe now measures the window twice, in two shapes, and reports both. One is the pair of loops written by hand in `wat` that produced the table above. The other is `crates/m0-scan`, compiled to wasm32 by the toolchain a decoder is written with, where the flat and the chunked loop both go through one summing function so that the only difference between them is the chunk bookkeeping and the host call.
+
+**The gate is judged against the compiled shape.** A decoder is Rust compiled to wasm32, so that is the loop that will actually run, and a gate applied to a loop nobody will ever execute is a gate on the probe. The order that was decided in matters, because choosing the more flattering of two numbers after seeing both is how a gate stops meaning anything: the argument is the one in issue #66, written down before either number existed, and the gate itself does not move. Three percent is still three percent, and both shapes are reported on every run whatever they say.
+
+The first thing the second shape shows is that the two are not measuring the same work. On the Apple M4 laptop the hand written flat scan takes 14.0 ms over 128 MiB and the compiled one takes 6.1 ms, so the toolchain is producing something more than twice as fast for the same arithmetic over the same bytes. Every ratio in the table above has that slower denominator underneath it. That does not make the old numbers wrong, and it does mean an overhead measured against the hand written pair is a percentage of a scan no decoder will ever run.
+
+The second is that ruling out the naive refill got stronger rather than weaker. The copy costs what it costs in milliseconds either way, so dividing it by a scan that is twice as fast doubles it as a fraction. On the same laptop it goes from 25.5 percent of the hand written flat scan to 98.7 percent of the compiled one. Finding number two above stands, and it stands harder.
 
 ## M1, the ABI and a decoder that does nothing interesting
 
