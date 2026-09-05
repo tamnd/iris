@@ -20,7 +20,20 @@
 //! point at somebody's real bucket if it were ever wrong.
 //!
 //! The decoder is compiled rather than checked in. See `tests/support/mod.rs`.
+//!
+//! # The second gate
+//!
+//! The other test here is the reconciliation half of #27. A scan reports how many requests it made
+//! and how many bytes came back, and a number a program computes about itself is worth very little
+//! on its own. So it is checked against what the server on the other end of the socket wrote in its
+//! own counters, which is the one observer that has no reason to agree.
+//!
+//! That half is not portable and does not pretend to be: it reads a Prometheus text endpoint and
+//! knows the names of an S3 server's metrics. It is pointed at one by an environment variable and
+//! it says so when it is not.
 
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
@@ -232,6 +245,199 @@ fn one_decoder_reads_a_file_and_an_object_and_says_the_same_thing() {
             assert_eq!(*value, cell(column, row), "column {column} row {row}");
         }
     }
+
+    tokio
+        .block_on(store.delete(&key))
+        .expect("the fixture is removed from the store");
+}
+
+/// What the endpoint says it has served, read from its own counters rather than from ours.
+///
+/// Two numbers out of the S3 server's Prometheus text endpoint. `GetObject` is the call a range
+/// request arrives as, and the bytes are everything the server sent over the S3 API, which is the
+/// response bodies plus their headers plus whatever else was asked of it in the meantime. So the
+/// request count reconciles exactly and the byte count reconciles as a bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Recorded {
+    gets: u64,
+    sent: u64,
+}
+
+impl Recorded {
+    /// Scrapes the endpoint, waiting until two readings in a row agree.
+    ///
+    /// The settling is not the test looking for the answer it wants. It is a fixed rule applied
+    /// before anything is compared, because a counter that is still being written when it is read
+    /// gives a number that belongs to no moment at all. Whatever value it settles on is the value
+    /// the assertions run against, right or wrong.
+    fn scrape(url: &str) -> Self {
+        let mut last = Self::read(url);
+        for _ in 0..25 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let now = Self::read(url);
+            if now == last {
+                return now;
+            }
+            last = now;
+        }
+        panic!("the endpoint's counters never stopped moving, last reading {last:?}");
+    }
+
+    /// One reading.
+    ///
+    /// A hand written request rather than an HTTP client, which is worth a sentence because it is
+    /// normally the wrong instinct. This is one GET to a loopback address with no authentication,
+    /// asking for HTTP/1.0, so the server answers, closes, and the body is everything up to the
+    /// end of the stream. There is no chunked encoding to decode, no redirect to follow and no
+    /// connection to reuse. Pulling an HTTP stack into this crate's dev-dependencies to avoid
+    /// fifteen lines would be the larger change.
+    fn read(url: &str) -> Self {
+        let rest = url
+            .strip_prefix("http://")
+            .expect("the metrics URL is plain HTTP to a server on this machine");
+        let (authority, path) = match rest.find('/') {
+            Some(at) => (&rest[..at], &rest[at..]),
+            None => (rest, "/"),
+        };
+
+        let mut socket = TcpStream::connect(authority)
+            .unwrap_or_else(|err| panic!("connecting to {authority} for metrics: {err}"));
+        socket
+            .write_all(format!("GET {path} HTTP/1.0\r\nHost: {authority}\r\n\r\n").as_bytes())
+            .expect("asking for the metrics");
+
+        let mut body = String::new();
+        socket
+            .read_to_string(&mut body)
+            .expect("reading the metrics back");
+
+        Self {
+            gets: sample(
+                &body,
+                "minio_api_requests_total{",
+                Some("name=\"GetObject\""),
+            ),
+            sent: sample(&body, "minio_api_requests_traffic_sent_bytes{", None),
+        }
+    }
+}
+
+/// The value of the first metric line that starts with `metric` and mentions `label`.
+///
+/// Zero when there is no such line, which is what a counter that has never been incremented looks
+/// like on this endpoint: it is simply absent until the first time it moves.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a request count and a byte count from a server that started a minute ago, read \
+              through a float because that is what the exposition format says they are"
+)]
+fn sample(body: &str, metric: &str, label: Option<&str>) -> u64 {
+    for line in body.lines() {
+        if !line.starts_with(metric) {
+            continue;
+        }
+        if label.is_some_and(|label| !line.contains(label)) {
+            continue;
+        }
+        let value = line
+            .rsplit_once(' ')
+            .expect("a Prometheus sample is a series and a value")
+            .1;
+        // Parsed as a float because that is what the format says it is, and this endpoint really
+        // does write six figure byte counts in scientific notation.
+        let value: f64 = value
+            .parse()
+            .unwrap_or_else(|err| panic!("the value on {line:?} is not a number: {err}"));
+        return value as u64;
+    }
+    0
+}
+
+#[test]
+#[ignore = "needs an S3 compatible endpoint, run by name from the object storage job"]
+fn what_a_scan_says_it_moved_is_what_the_endpoint_recorded() {
+    let endpoint = match Endpoint::from_env() {
+        Ok(endpoint) => endpoint,
+        Err(why) => panic!(
+            "this gate was run without an endpoint to run against: {why}. \
+             The object storage job in ci.yml starts one and exports the five variables."
+        ),
+    };
+    let metrics = std::env::var("IRIS_TEST_METRICS_URL").unwrap_or_else(|_| {
+        panic!(
+            "IRIS_TEST_METRICS_URL is not set, so there is nothing to reconcile against. \
+             It is the S3 server's Prometheus endpoint, and the server has to have been started \
+             with its metrics readable without a token."
+        )
+    });
+
+    let builder = builder(ROWS, COLUMNS);
+    let bytes = builder.build().expect("a container this small always fits");
+    let len = bytes.len() as u64;
+
+    let runtime = Runtime::new()
+        .expect("the engine builds")
+        .with_max_batch_rows(BATCH_ROWS);
+
+    let tokio = tokio::runtime::Runtime::new().expect("a tokio runtime starts");
+    let store = endpoint.store();
+    let key = ObjectPath::from("reconcile.iris");
+    tokio
+        .block_on(store.put(&key, bytes.into()))
+        .expect("the fixture uploads");
+
+    let object = tokio
+        .block_on(ObjectSource::open(Arc::clone(&store), key.clone()))
+        .expect("the object opens");
+    assert_eq!(object.len(), len);
+
+    let _guard = tokio.enter();
+    let mut dataset = runtime
+        .open_windowed(Box::new(object))
+        .expect("the container opens over the network");
+
+    // Read after opening, so the trailer, the header, the footer and the decoder module are on the
+    // far side of the line. What is being reconciled is a scan.
+    let before = Recorded::scrape(&metrics);
+
+    let batches = dataset.scan().expect("the decoder runs over the network");
+    let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    assert_eq!(rows as u64, ROWS, "the scan did not read the dataset");
+
+    let scan = dataset.last_scan();
+    let after = Recorded::scrape(&metrics);
+    let gets = after.gets - before.gets;
+    let sent = after.sent - before.sent;
+
+    assert!(
+        scan.requests > 1,
+        "a scan of this container over a network made {} requests, which is too few to be \
+         reconciling anything interesting",
+        scan.requests
+    );
+    assert_eq!(
+        scan.requests, gets,
+        "the scan says it made {} requests and the endpoint recorded {gets}",
+        scan.requests
+    );
+
+    // Bytes reconcile as a bound rather than exactly, and the reason is on the server's side of the
+    // wire: its counter is everything it sent over the S3 API, which includes a response header per
+    // request. So the scan's number has to be no larger than the endpoint's, and the difference has
+    // to be small enough to be headers rather than a second copy of the data.
+    assert!(
+        sent >= scan.bytes,
+        "the scan says {} bytes came back and the endpoint only sent {sent}",
+        scan.bytes
+    );
+    let overhead = sent - scan.bytes;
+    assert!(
+        overhead <= gets * 4_096,
+        "{overhead} bytes of the {sent} the endpoint sent are not accounted for by the {} the \
+         scan counted, across {gets} requests",
+        scan.bytes
+    );
 
     tokio
         .block_on(store.delete(&key))

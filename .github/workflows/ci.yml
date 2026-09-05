@@ -125,6 +125,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: irisgatesecret
       AWS_REGION: us-east-1
       IRIS_TEST_BUCKET: iris-gate
+      IRIS_TEST_METRICS_URL: http://127.0.0.1:9000/minio/metrics/v3/api/requests
       MINIO: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     steps:
       - uses: actions/checkout@v7
@@ -142,6 +143,7 @@ jobs:
           docker run -d --name iris-minio -p 9000:9000 \
             -e "MINIO_ROOT_USER=$AWS_ACCESS_KEY_ID" \
             -e "MINIO_ROOT_PASSWORD=$AWS_SECRET_ACCESS_KEY" \
+            -e MINIO_PROMETHEUS_AUTH_TYPE=public \
             "$MINIO" server /data
           for _ in $(seq 1 60); do
             docker exec iris-minio mc ready local && break
@@ -155,11 +157,17 @@ jobs:
       # the four gigabyte gate: an ignored test that starts running by accident is a job that fails
       # for a reason nobody asked about, and a named one that disappears is a job that fails saying
       # the name is gone.
+      #
+      # One thread, because the second gate reconciles what a scan says it moved against what the
+      # server wrote in its own counters, and those counters are the server's rather than the
+      # test's. Another test making requests at the same time lands in the same numbers and the
+      # reconciliation is then about nothing.
       - name: One decoder, a file and an object
         run: >-
           cargo test --locked -p iris-runtime --test portable --
-          --ignored --exact
+          --ignored --test-threads 1 --exact
           one_decoder_reads_a_file_and_an_object_and_says_the_same_thing
+          what_a_scan_says_it_moved_is_what_the_endpoint_recorded
 
       - name: Clean up after a run that did not
         if: always()

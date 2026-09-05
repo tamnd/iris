@@ -16,7 +16,7 @@
 //! the offset is added, and it cannot reach outside it by overflowing, because the addition
 //! saturates into a failed bounds check.
 
-use crate::source::{Fetch, RangeSource, SourceError, bounds};
+use crate::source::{Fetch, RangeSource, SourceError, Traffic, bounds};
 
 /// A range of another source, addressed from zero.
 ///
@@ -76,6 +76,14 @@ impl<S: RangeSource> RangeSource for Segment<S> {
         bounds(at, len, self.len)?;
         self.inner.range(self.at + at, len)
     }
+
+    fn traffic(&self) -> Traffic {
+        // The source underneath is the one doing the work, and it is counting the whole file
+        // rather than this section. That is the right number: a host asking what a scan cost wants
+        // what left the machine, not what left the machine on behalf of one section of a container
+        // it read three parts of.
+        self.inner.traffic()
+    }
 }
 
 /// Delegates to a source behind a box, so `Box<dyn RangeSource>` is a source.
@@ -94,6 +102,10 @@ impl<S: RangeSource + ?Sized> RangeSource for Box<S> {
 
     fn range(&mut self, at: u64, len: usize) -> Result<Fetch<'_>, SourceError> {
         (**self).range(at, len)
+    }
+
+    fn traffic(&self) -> Traffic {
+        (**self).traffic()
     }
 }
 

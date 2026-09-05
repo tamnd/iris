@@ -10,9 +10,11 @@
 //!
 //! # What it does not check
 //!
-//! Speed, memory, and how many times the source went to the network. Those are properties worth
+//! Speed, memory, and how much a source fetches to serve a given range. Those are properties worth
 //! measuring and they are not properties of correctness, and a suite that mixed the two would fail
-//! on a slow machine and be ignored from then on.
+//! on a slow machine and be ignored from then on. What it does check about
+//! [`RangeSource::traffic`] is only that the counters can be subtracted, which is a promise rather
+//! than a measurement.
 //!
 //! It also does not check thread safety, because [`RangeSource`] does not promise any. A source is
 //! driven by whichever thread owns it.
@@ -80,6 +82,7 @@ pub fn check(source: &mut dyn RangeSource, contents: &[u8]) {
     ready_is_sticky(source, contents);
     out_of_bounds_does_not_break_the_source(source, contents);
     the_largest_promised_range_is_served_wherever_it_starts(source, contents, largest);
+    counters_only_go_up(source, contents);
 }
 
 /// Offsets worth trying, which are the ones near a boundary of some kind.
@@ -230,4 +233,42 @@ fn the_largest_promised_range_is_served_wherever_it_starts(
             "the promised length gave the wrong bytes at {at}"
         );
     }
+}
+
+/// The traffic counters never report less than they did a moment ago.
+///
+/// Not a check on how much a source fetches, which is a measurement and not a promise. It is a
+/// check that the two numbers can be subtracted at all. A host works out what one scan cost by
+/// taking a reading before it and a reading after it, and a counter that can go down makes that
+/// difference mean nothing. Clearing the count at the start of each request is the obvious way to
+/// get this wrong, and it looks entirely reasonable while it is being written.
+fn counters_only_go_up(source: &mut dyn RangeSource, contents: &[u8]) {
+    let len = contents.len() as u64;
+    let want = contents.len().min(64);
+    let mut last = source.traffic();
+
+    // Forwards, then back to the start, so a source that resets when it moves and a source that
+    // resets when it returns to something it has already served are both caught.
+    for at in [0, len / 2, 0] {
+        if at + want as u64 > len {
+            continue;
+        }
+        read_blocking(source, at, want).unwrap_or_else(|error| {
+            panic!("reading {want} bytes at {at} should have worked: {error}")
+        });
+        let now = source.traffic();
+        assert!(
+            now.requests >= last.requests && now.bytes >= last.bytes,
+            "traffic went backwards, from {last:?} to {now:?}, after reading {want} bytes at {at}"
+        );
+        last = now;
+    }
+
+    // A question the source refuses is still not a reason for it to forget what it has done.
+    let _ = source.range(len, 1);
+    let now = source.traffic();
+    assert!(
+        now.requests >= last.requests && now.bytes >= last.bytes,
+        "traffic went backwards, from {last:?} to {now:?}, across a refusal"
+    );
 }

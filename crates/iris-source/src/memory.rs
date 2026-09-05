@@ -7,7 +7,7 @@
 
 use bytes::Bytes;
 
-use crate::source::{Fetch, RangeSource, SourceError, bounds};
+use crate::source::{Fetch, RangeSource, SourceError, Traffic, bounds};
 
 /// A [`RangeSource`] over a buffer that is already resident.
 ///
@@ -48,6 +48,16 @@ impl RangeSource for MemorySource {
         // Anything else would mean a buffer longer than the address space it is stored in.
         let start = usize::try_from(at).unwrap_or(usize::MAX);
         Ok(Fetch::Ready(&self.bytes[start..start + len]))
+    }
+
+    fn traffic(&self) -> Traffic {
+        // Nothing is ever fetched here. Whatever it cost to produce this buffer was paid by
+        // whoever produced it, before iris was handed the result, so counting a slice as a request
+        // would make the one source that does no I/O the noisiest one in the system.
+        //
+        // Which makes this the baseline the other two are read against: a scan over a resident
+        // buffer is what zero looks like.
+        Traffic::NONE
     }
 }
 
