@@ -458,3 +458,55 @@ fn arbitrary_bytes_never_panic() {
         }
     }
 }
+
+#[test]
+fn a_container_written_out_is_the_container_that_was_built() {
+    // The two ways out of the builder have to agree byte for byte, because the gate that reads a
+    // four gigabyte file writes it with one of them and checks it against a container built with
+    // the other. A difference of a single padding byte would move every offset after it.
+    let mut builder = Builder::new("readings", 1_024);
+    builder.schema(SchemaEncoding::ArrowIpc, b"a schema".to_vec());
+    builder.section(SectionKind::Data, vec![7u8; 300]);
+    builder.section(SectionKind::Sidecar, b"an index".to_vec());
+    builder.embed_decoder(
+        "readings-v1",
+        (0, 1),
+        iris_abi::CapabilitySet::new(),
+        b"\0asm\x01\0\0\0".to_vec(),
+    );
+
+    let collected = builder.build().expect("this builds");
+    let mut written = Vec::new();
+    let len = builder.build_into(&mut written).expect("this writes");
+
+    assert_eq!(written, collected);
+    assert_eq!(len, collected.len() as u64);
+    Container::parse(&written)
+        .expect("this parses")
+        .verify()
+        .expect("this verifies");
+}
+
+#[test]
+fn a_writer_that_refuses_gives_back_what_it_said() {
+    /// A writer that has already run out of room.
+    struct Full;
+
+    impl std::io::Write for Full {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut builder = Builder::new("readings", 1);
+    builder.section(SectionKind::Data, vec![0u8; 8]);
+    let err = builder.build_into(Full).expect_err("this cannot write");
+    assert!(
+        matches!(err, Error::Io { kind, .. } if kind == std::io::ErrorKind::StorageFull),
+        "{err}"
+    );
+}

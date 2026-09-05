@@ -9,6 +9,10 @@
 //! interchangeable because they all pass the same suite in [`conformance`], which is public so that
 //! a fourth implementation written somewhere else can be held to the same promises.
 //!
+//! [`Segment`] is not a fourth source but an adapter over any of them. It presents a byte range of
+//! one source as a source in its own right, which is how a decoder is shown one section of a
+//! container and nothing else when the container is too large to hold.
+//!
 //! The one thing to know before reading the trait is that asking for a range does not wait. It
 //! either hands back the bytes or says they are not here yet, and the host does something else in
 //! between. That is what a single threaded host needs and it is what the resumable path in the
@@ -26,9 +30,11 @@
 //! supported platforms on every change.
 
 pub mod memory;
+pub mod segment;
 pub mod source;
 
 pub use memory::MemorySource;
+pub use segment::Segment;
 pub use source::{Fetch, RangeSource, SourceError, bounds, read_blocking};
 
 #[cfg(feature = "conformance")]

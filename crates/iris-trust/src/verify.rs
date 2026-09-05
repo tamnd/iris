@@ -73,14 +73,42 @@ impl Policy {
     /// carrying both digests, if the bytes are not the module the container names.
     pub fn decoder<'a>(&self, container: &Container<'a>) -> Result<Verified<'a>, Untrusted> {
         let record = container.decoder().ok_or(Untrusted::Missing)?;
+        self.check(record, container.decoder_bytes().map(Cow::Borrowed))
+    }
+
+    /// The same check, for a host that read the module out of the file itself.
+    ///
+    /// A host that is not holding the container cannot be handed a slice of it, so it reads the
+    /// section named by [`iris_format::Directory::decoder_section`] and passes the bytes here.
+    /// `embedded` is `None` when there is no such section, which is the same thing as an embedded
+    /// record naming a section the file does not have.
+    ///
+    /// Everything after that point is identical, deliberately. The bytes are hashed and compared
+    /// against the record the same way whether they arrived as a borrow of a resident file, as a
+    /// read through a window, or from a resolver, because how they were obtained is exactly the
+    /// thing the digest exists to stop mattering.
+    ///
+    /// # Errors
+    ///
+    /// See [`Policy::decoder`].
+    pub fn decoder_read<'a>(
+        &self,
+        record: &DecoderRef<'a>,
+        embedded: Option<Vec<u8>>,
+    ) -> Result<Verified<'a>, Untrusted> {
+        self.check(record, embedded.map(Cow::Owned))
+    }
+
+    /// The comparison both entry points end in, written once so they cannot come to differ.
+    fn check<'a>(
+        &self,
+        record: &DecoderRef<'a>,
+        embedded: Option<Cow<'a, [u8]>>,
+    ) -> Result<Verified<'a>, Untrusted> {
         let expected = record.digest;
 
         let module: Cow<'a, [u8]> = match record.location {
-            DecoderLocation::Embedded { section } => Cow::Borrowed(
-                container
-                    .decoder_bytes()
-                    .ok_or(Untrusted::Lost { section })?,
-            ),
+            DecoderLocation::Embedded { section } => embedded.ok_or(Untrusted::Lost { section })?,
             DecoderLocation::External => {
                 let resolver = self.resolver().ok_or_else(|| Untrusted::External {
                     name: record.name.to_owned(),
@@ -275,6 +303,73 @@ mod tests {
         };
         assert_eq!(expected, Digest::of(MODULE));
         assert_ne!(found, expected);
+    }
+
+    #[test]
+    fn a_module_read_out_of_a_file_is_checked_the_same_way() {
+        let bytes = embedded();
+        let container = Container::parse(&bytes).expect("the container parses");
+        let record = container.decoder().expect("the container names a decoder");
+
+        // What a windowed host does: it read the decoder section itself and owns the bytes, so it
+        // cannot hand over a borrow of a file it is not holding.
+        let read = container
+            .decoder_bytes()
+            .expect("the section is here")
+            .to_vec();
+        let verified = Policy::embedded_only()
+            .decoder_read(record, Some(read))
+            .expect("the module is the one the container names");
+
+        assert_eq!(verified.module(), MODULE);
+        assert_eq!(verified.digest(), Digest::of(MODULE));
+        assert_eq!(verified.record().name, "test");
+
+        // And the same answer as the resident path, which is the claim worth pinning down. Two
+        // entry points that agree on a good file and differ on a bad one would be worse than one.
+        assert_eq!(
+            decoder(&container)
+                .expect("the resident path agrees")
+                .digest(),
+            verified.digest()
+        );
+    }
+
+    #[test]
+    fn a_module_read_wrong_is_refused_by_the_digest_and_not_by_where_it_came_from() {
+        let bytes = embedded();
+        let container = Container::parse(&bytes).expect("the container parses");
+        let record = container.decoder().expect("the container names a decoder");
+
+        let mut read = container
+            .decoder_bytes()
+            .expect("the section is here")
+            .to_vec();
+        read[MODULE.len() / 2] ^= 1;
+
+        let Err(Untrusted::Digest { expected, found }) =
+            Policy::embedded_only().decoder_read(record, Some(read))
+        else {
+            panic!("a module that was read wrong was accepted");
+        };
+        assert_eq!(expected, Digest::of(MODULE));
+        assert_ne!(found, expected);
+    }
+
+    #[test]
+    fn an_embedded_record_with_nothing_read_says_the_section_is_lost() {
+        let bytes = embedded();
+        let container = Container::parse(&bytes).expect("the container parses");
+        let record = container.decoder().expect("the container names a decoder");
+
+        // A host reaches this by finding no section with the id the record names, which is a file
+        // that points at a decoder it does not contain.
+        assert_eq!(
+            Policy::embedded_only()
+                .decoder_read(record, None)
+                .unwrap_err(),
+            Untrusted::Lost { section: 1 }
+        );
     }
 
     #[test]

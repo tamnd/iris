@@ -113,6 +113,32 @@ pub enum Error {
         /// How many bytes it asked for.
         needed: u64,
     },
+    /// Writing a container out did not work.
+    ///
+    /// Only [`crate::Builder::build_into`] produces this. Reading never touches a file: a container
+    /// is parsed from bytes somebody else fetched, which is what lets the same parser run against a
+    /// mapped file, a buffer and a fuzzer's input.
+    ///
+    /// The kind is kept and the error itself is not, because this enum compares by value and
+    /// [`std::io::Error`] does not. The kind is the part anybody branches on anyway, and the text is
+    /// there for whoever reads the message.
+    #[error("the container could not be written: {detail}")]
+    Io {
+        /// What went wrong, as the operating system classified it.
+        kind: std::io::ErrorKind,
+        /// What it said.
+        detail: String,
+    },
+}
+
+impl Error {
+    /// Wraps a failure from the writer a container is being written to.
+    pub(crate) fn io(err: &std::io::Error) -> Self {
+        Self::Io {
+            kind: err.kind(),
+            detail: err.to_string(),
+        }
+    }
 }
 
 /// The result of reading a container.

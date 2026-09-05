@@ -1033,6 +1033,7 @@ dependencies = [
  "iris-abi",
  "iris-format",
  "iris-guard",
+ "iris-source",
  "iris-trust",
  "iris-vm",
  "thiserror",
