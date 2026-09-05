@@ -68,7 +68,18 @@ jobs:
           # GitHub Action runs on a build machine and nothing it contains is linked
           # into anything we ship, so its licence is not the same question. This
           # cache action is LGPL-3.0 and that is fine where it sits.
-          allow-dependencies-licenses: pkg:githubactions/Swatinem/rust-cache
+          #
+          # The second one is Mozilla's root certificate list, which arrives with the
+          # TLS stack the M4 object storage gate talks to a bucket through. It is
+          # CDLA-Permissive-2.0, which is a licence for data rather than for code and
+          # puts no condition on anything that uses the data, and it is reachable only
+          # through a dev-dependency, so nothing an engine embeds carries it. Named
+          # here rather than added to allow-licenses, so that the next crate arriving
+          # under that licence is still something somebody has to look at. deny.toml
+          # carries the same exception for the same reason.
+          allow-dependencies-licenses: >-
+            pkg:githubactions/Swatinem/rust-cache,
+            pkg:cargo/webpki-root-certs
 
   # The actions analysis takes about forty seconds and catches the thing a workflow change is most
   # likely to get wrong, so it runs on every pull request. The rust analysis takes six minutes,

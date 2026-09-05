@@ -42,6 +42,15 @@ thiserror.workspace = true
 # by running cargo, not by linking it, and a dev-dependency would build a second copy of it for the
 # host that nothing ever calls.
 
+[dev-dependencies]
+# The object storage half of the M4 portability gate. These are dev-dependencies and nothing else, so
+# a host that embeds this crate to read local files still does not link an HTTP stack or an async
+# runtime, which is the promise iris-source makes about its own feature and would be worth very
+# little if the runtime above it broke it.
+iris-source = { workspace = true, features = ["object-store"] }
+object_store = { workspace = true, features = ["aws"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
 [features]
 # Off by default and not API. It exposes the two halves of assembling a batch so the guard cost
 # probe can time one against the other. See the `probe` module for why that is a feature rather than

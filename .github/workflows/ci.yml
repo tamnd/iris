@@ -94,6 +94,79 @@ jobs:
       - name: Doc tests
         run: cargo test --workspace --doc --all-features --locked
 
+  # The M4 portability gate, which needs somewhere for an object to live.
+  #
+  # MinIO rather than a mock, because the claim being checked is that a decoder does not know where
+  # its bytes came from, and a mock is a thing written by the same people who wrote the code it is
+  # standing in for. This talks S3 over HTTP to a server that implements it, with signing, ranged
+  # GETs and all the rest, which is the part a mock would quietly skip.
+  #
+  # Started with `docker run` rather than declared as a service container, which would have been
+  # tidier. A service container runs an image's default command and GitHub gives no way to change it,
+  # and this image's default command is the server with no arguments, which prints its usage and
+  # exits. Reaching for an image whose default happens to be the right one would mean trusting a
+  # repackager's conventions to keep a workflow working.
+  #
+  # The image is pinned to a digest rather than to a tag, which is the opposite of what the actions
+  # in this file do. An action is pinned to a major version because its publisher versions it and a
+  # patch to it is wanted. This image publishes one moving tag and nothing else, so a tag here would
+  # mean a different S3 server every few weeks with no way to tell which one a red run used.
+  #
+  # One runner, not the four the test matrix uses. The gate is about where the bytes are, and the
+  # answer does not depend on which operating system asked. Repeating it on Windows and macOS would
+  # cost three more MinIO containers and check the same sentence three more times.
+  object-storage:
+    name: Object storage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ACCESS_KEY_ID: irisgate
+      AWS_SECRET_ACCESS_KEY: irisgatesecret
+      AWS_REGION: us-east-1
+      IRIS_TEST_BUCKET: iris-gate
+      MINIO: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: object-storage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The client comes out of the server image rather than off the network, so this job downloads
+      # one thing instead of two and the two halves cannot end up different versions of each other.
+      - name: An S3 endpoint with a bucket in it
+        run: |
+          docker run -d --name iris-minio -p 9000:9000 \
+            -e "MINIO_ROOT_USER=$AWS_ACCESS_KEY_ID" \
+            -e "MINIO_ROOT_PASSWORD=$AWS_SECRET_ACCESS_KEY" \
+            "$MINIO" server /data
+          for _ in $(seq 1 60); do
+            docker exec iris-minio mc ready local && break
+            sleep 1
+          done
+          docker exec iris-minio mc alias set gate http://127.0.0.1:9000 \
+            "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
+          docker exec iris-minio mc mb --ignore-existing "gate/$IRIS_TEST_BUCKET"
+
+      # Named rather than run with a bare `--ignored`, for the same reason the fleet workflow names
+      # the four gigabyte gate: an ignored test that starts running by accident is a job that fails
+      # for a reason nobody asked about, and a named one that disappears is a job that fails saying
+      # the name is gone.
+      - name: One decoder, a file and an object
+        run: >-
+          cargo test --locked -p iris-runtime --test portable --
+          --ignored --exact
+          one_decoder_reads_a_file_and_an_object_and_says_the_same_thing
+
+      - name: Clean up after a run that did not
+        if: always()
+        run: |
+          docker rm -f iris-minio || true
+          rm -rf target/gate-object
+
   # The decoder side of iris is a wasm32 module, so the tree has to keep
   # compiling for a target that has no operating system under it.
   wasm:
@@ -254,7 +327,20 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [discipline, lint, test, wasm, no-std, features, msrv, docs, miri, coverage]
+    needs:
+      [
+        discipline,
+        lint,
+        test,
+        object-storage,
+        wasm,
+        no-std,
+        features,
+        msrv,
+        docs,
+        miri,
+        coverage,
+      ]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

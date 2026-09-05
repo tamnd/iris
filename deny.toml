@@ -37,6 +37,16 @@ allow = [
 name = "unicode-ident"
 allow = ["Unicode-DFS-2016"]
 
+# Mozilla's root certificate list, which arrives with the TLS stack that the M4
+# object storage gate talks to a bucket through. CDLA-Permissive-2.0 is a licence
+# for data rather than for code, it puts no condition on anything that uses the
+# data, and this is a list of certificate authorities rather than something that
+# gets compiled into iris. It is also reachable only through a dev-dependency, so
+# nothing an engine embeds carries it.
+[[licenses.exceptions]]
+name = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

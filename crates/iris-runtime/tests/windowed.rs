@@ -15,25 +15,17 @@
 //! The decoders are compiled rather than checked in. See `tests/support/mod.rs`.
 
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
-use arrow_array::{Int64Array, RecordBatch};
-use arrow_schema::{DataType, Field, Schema};
-use iris_abi::{ABI_MAJOR, ABI_MINOR, Capability, CapabilitySet};
-use iris_format::{Builder, Directory, Placement, SchemaEncoding, SectionKind};
-use iris_runtime::{Runtime, schema_to_ipc};
+use arrow_array::RecordBatch;
+use iris_format::{Directory, Placement, SectionKind};
+use iris_runtime::Runtime;
 use iris_source::{FileSource, RangeSource};
 
 mod support;
 
-use support::{decoder_module, workspace_root};
-
-/// The fixed width decoder's header: how many rows, then how many columns.
-const HEADER: u64 = 16;
-
-/// The width of every value the fixture holds.
-const WIDTH: u64 = 8;
+use support::{HEADER, WIDTH, builder, cell, column_values, schema, write_container};
 
 /// Rows in the small fixture, which both paths read.
 const ROWS: u64 = 500;
@@ -55,125 +47,8 @@ const HUGE_ROWS: u64 = 537_000_000;
 /// The window the large fixture is read through, which is one sixteenth of it.
 const WINDOW: usize = 256 * 1024 * 1024;
 
-/// The value the fixture puts in a given cell.
-///
-/// The row index, offset by the column. Nothing cleverer, because the failure worth catching here
-/// is a window that came back holding the bytes from somewhere else in the file, and a value that
-/// is derived from the row says which row turned up instead.
-fn cell(column: u64, row: u64) -> i64 {
-    i64::try_from(column * 1_000_000_000 + row).expect("the fixture's values all fit")
-}
-
-/// The schema for a fixture of this many columns: non-nullable `i64`, one field each.
-fn schema(columns: u64) -> Schema {
-    Schema::new(
-        (0..columns)
-            .map(|c| Field::new(format!("c{c}"), DataType::Int64, false))
-            .collect::<Vec<_>>(),
-    )
-}
-
-/// The bytes the fixed width decoder reads: two `u64` of header, then column by column.
-///
-/// Filled in place rather than pushed onto, because the large fixture is four gigabytes and a `Vec`
-/// that doubles as it grows would peak at three copies of that. This allocates the whole thing once
-/// and writes into it, which is the same reason [`Builder::build_into`] exists.
-fn source(rows: u64, columns: u64) -> Vec<u8> {
-    let values = usize::try_from(rows * columns).expect("the fixture fits in this host's memory");
-    let header = usize::try_from(HEADER).expect("the fixed width header is sixteen bytes");
-    let mut out = vec![0u8; header + values * 8];
-    out[..8].copy_from_slice(&rows.to_le_bytes());
-    out[8..16].copy_from_slice(&columns.to_le_bytes());
-
-    let (slots, rest) = out[header..].as_chunks_mut::<8>();
-    debug_assert!(rest.is_empty(), "the buffer holds whole values and no more");
-    let mut slots = slots.iter_mut();
-    for column in 0..columns {
-        for row in 0..rows {
-            *slots
-                .next()
-                .expect("the buffer was sized for exactly these values") =
-                cell(column, row).to_le_bytes();
-        }
-    }
-    out
-}
-
-/// A container for a fixture of this shape, carrying the decoder that reads it.
-fn builder(rows: u64, columns: u64) -> Builder {
-    let mut builder = Builder::new("readings", rows);
-    builder.schema(
-        SchemaEncoding::ArrowIpc,
-        schema_to_ipc(&schema(columns)).expect("integer columns always encode"),
-    );
-    builder.section(SectionKind::Data, source(rows, columns));
-    builder.embed_decoder(
-        "fixedwidth",
-        (ABI_MAJOR, ABI_MINOR),
-        CapabilitySet::new().with(Capability::RANDOM_ACCESS),
-        decoder_module().to_vec(),
-    );
-    builder
-}
-
-/// A file that removes itself, so a gate that fails does not leave four gigabytes behind.
-///
-/// Declared before the source that reads it in every test here, so it is dropped after that source
-/// is closed. Removing a file somebody still has open is fine on Unix and is not on Windows, and
-/// this test runs on both.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// Writes `container` to a file of its own under the workspace target directory.
-///
-/// Under `target` and not under the system temporary directory, which on a lot of Linux machines is
-/// a tmpfs. A four gigabyte fixture written to one of those is a four gigabyte fixture held in
-/// memory, which is the thing this whole path exists to avoid.
-fn write_container(name: &str, builder: &Builder) -> (Scratch, u64) {
-    let dir = workspace_root().join("target").join("gate-window");
-    std::fs::create_dir_all(&dir).expect("creating the fixture directory");
-    let path = dir.join(format!("{name}.iris"));
-    let scratch = Scratch(path.clone());
-
-    let file = File::create(&path).expect("creating the fixture");
-    let mut out = BufWriter::new(file);
-    let len = builder.build_into(&mut out).expect("writing the fixture");
-    out.flush().expect("flushing the fixture");
-    out.into_inner()
-        .expect("the fixture is written")
-        .sync_all()
-        .expect("the fixture reaches the disk");
-
-    assert_eq!(
-        std::fs::metadata(&path)
-            .expect("the fixture is there")
-            .len(),
-        len,
-        "the builder said it wrote a different number of bytes than the file holds"
-    );
-    (scratch, len)
-}
-
-/// Every value in a column of the batches, in order.
-fn column_values(batches: &[RecordBatch], column: usize) -> Vec<i64> {
-    batches
-        .iter()
-        .flat_map(|batch| {
-            batch
-                .column(column)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .expect("an Int64 field produces an Int64Array")
-                .values()
-                .to_vec()
-        })
-        .collect()
-}
+/// Where this gate keeps its fixtures, which the fleet workflow removes after a run that failed.
+const SCRATCH: &str = "gate-window";
 
 /// Where the data section starts, read out of the file with nothing but `std`.
 ///
@@ -226,7 +101,7 @@ fn value_on_disk(path: &PathBuf, data_at: u64, rows: u64, column: u64, row: u64)
 fn a_container_read_through_a_window_decodes_to_what_a_resident_one_does() {
     let builder = builder(ROWS, COLUMNS);
     let resident = builder.build().expect("a container this small always fits");
-    let (scratch, len) = write_container("small", &builder);
+    let (scratch, len) = write_container(SCRATCH, "small", &builder);
     assert_eq!(len, resident.len() as u64, "the two writers disagree");
 
     let runtime = Runtime::new()
@@ -270,7 +145,7 @@ fn a_container_read_through_a_window_decodes_to_what_a_resident_one_does() {
 
 #[test]
 fn a_row_range_through_a_window_is_that_range_and_nothing_else() {
-    let (scratch, _) = write_container("range", &builder(ROWS, COLUMNS));
+    let (scratch, _) = write_container(SCRATCH, "range", &builder(ROWS, COLUMNS));
     let runtime = Runtime::new()
         .expect("the engine builds")
         .with_max_batch_rows(BATCH_ROWS);
@@ -295,7 +170,7 @@ fn a_row_range_through_a_window_is_that_range_and_nothing_else() {
 /// A dataset that worked once and then said its source was lost would pass every other test here.
 #[test]
 fn a_windowed_dataset_survives_the_scan_it_just_ran() {
-    let (scratch, _) = write_container("again", &builder(ROWS, COLUMNS));
+    let (scratch, _) = write_container(SCRATCH, "again", &builder(ROWS, COLUMNS));
     let runtime = Runtime::new()
         .expect("the engine builds")
         .with_max_batch_rows(BATCH_ROWS);
@@ -338,7 +213,7 @@ fn a_dataset_larger_than_four_gibibytes_reads_through_a_window_a_fraction_of_its
     /// The ceiling this gate is about.
     const CEILING: u64 = 4 * 1024 * 1024 * 1024;
 
-    let (scratch, len) = write_container("huge", &builder(HUGE_ROWS, 1));
+    let (scratch, len) = write_container(SCRATCH, "huge", &builder(HUGE_ROWS, 1));
     assert!(
         len > CEILING,
         "the fixture is {len} bytes, which is not larger than the ceiling"
