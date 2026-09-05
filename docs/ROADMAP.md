@@ -48,7 +48,7 @@ Neither branch is taken yet, for two reasons. The first is that both failing row
 
 **What changes.** Three things, and none of them is moving the gate. The gate was written down before the measurement, which is the only order in which a gate means anything, and a gate that moves when it is inconvenient is not a gate.
 
-1. M4 does not start until the x86-64 result has been reproduced on hardware nobody else is using. Of the machines this project has, one is eligible: the Intel Core i9-13900K. The three AMD EPYC boxes are shared tenancy virtual machines, so they cannot produce a number with a duration in it. The run goes through iris-bench against a registered claim. If it reproduces, the abstraction cost is real and the design has to answer it. If it does not, the hosted rows were noise and M4 proceeds as written. That is issue #65. The second shape below has already changed what that run is for.
+1. M4 does not start until the x86-64 result has been reproduced on hardware nobody else is using. Of the machines this project has, one is eligible: the Intel Core i9-13900K. The three AMD EPYC boxes are shared tenancy virtual machines, so they cannot produce a number with a duration in it. If it reproduces, the abstraction cost is real and the design has to answer it. If it does not, the hosted rows were noise and M4 proceeds as written. That is issue #65, and neither of those two things is what happened. The last section below is what did.
 2. The naive refill is already ruled out as an implementation. A host memcpy of the window between chunks costs between a quarter and one and a half times the scan itself, on every machine measured including the ones that pass the abstraction gate. Whatever windowing ships, the bytes do not get copied into guest memory a window at a time. That is a real finding and it is the useful half of the second measurement.
 3. The probe grows a second windowed shape, compiled from Rust rather than written by hand, so that the next run of this measurement separates the cost of the design from the cost of the way the probe expresses it. That is issue #66, and it is done. The next section is what it found.
 
@@ -77,7 +77,36 @@ So the answer to the question the M0 decision left open is that the hand written
 
 The second finding is that ruling out the naive refill got stronger rather than weaker. The copy costs what it costs in milliseconds either way, so dividing it by a faster scan makes it a larger fraction. On this run the refill costs between 67 and 91 percent of the compiled flat scan on all four platforms, against 36 to 121 percent of the hand written one. Finding number two above stands, and it stands harder.
 
-**What this does to bet two.** It is not closed, and it is much closer to closed than it was. What it no longer is, is a question about whether the design has an x86-64 problem, because the shape a decoder actually has does not have one on either x86-64 machine here. What is left is that all eight rows across the two runs are shared hosted machines, so the confirmation on hardware nobody else is using still has to happen. That is still #65, with a much narrower job: confirm a pass rather than diagnose a failure.
+**What this does to bet two.** It is not closed. What it no longer is, is a question about whether the design has an x86-64 problem, because the shape a decoder actually has does not have one on either x86-64 machine here. What is left is that all eight rows across the two runs are shared hosted machines, so the confirmation on hardware nobody else is using still has to happen. That is #65, and the next section is what happened when it was attempted.
+
+### What the workstation could not measure
+
+The reproduction on unshared hardware is issue #65, and the machine for it is the Intel Core i9-13900K, which is the one machine in the fleet whose timings are supposed to mean anything. Two runs of the probe on it said the compiled shape fails the gate at +4.03% and +3.21%, with the flat and windowed confidence intervals not overlapping either time, while the hand written shape passed at -3.99% and -4.83%. That is the exact inverse of the hosted matrix above, and it was tempting to write it up as the answer.
+
+It is not the answer. Judging a three percent gate on a confidence interval taken from inside one run is the wrong measurement, and it took a third run to see why. The flat scan and the windowed scan are measured one after the other, so anything that moves the machine between the two blocks lands entirely in the difference between them, and an interval computed inside a block cannot see it by construction. What that interval describes is how consistent the samples were while the block was running, which is not the question.
+
+So the probe was run twenty four times in one sitting on that machine, six repeats at each of four window sizes, interleaved rather than blocked so that drift over the quarter hour would spread across all four sizes instead of landing on whichever size happened to be measured while it happened. Run 33963369333:
+
+| Window | Runs | Compiled, median | Compiled, range | Compiled flat scan, median |
+| --- | --- | --- | --- | --- |
+| 4 MiB | 6 | +2.82% | +0.77% to +8.45% | 35.39 ms |
+| 16 MiB | 6 | +2.53% | -8.00% to +4.80% | 30.25 ms |
+| 32 MiB | 6 | +1.70% | -0.42% to +17.70% | 34.58 ms |
+| 128 MiB | 6 | -0.03% | -0.32% to +5.25% | 30.96 ms |
+
+Across all twenty four the median is +1.09% and the standard deviation is 4.69 percentage points, on a gate set at three. Nine of the twenty four are above the gate and the rest are below it, including two that are below zero by more than the gate is above it. The two earlier runs that said +4.03% and +3.21% were two draws from that.
+
+**The finding is about the machine, not about the window.** This workstation cannot resolve a three percent effect in a single run, and no amount of extra samples inside a run fixes that, because the samples inside a run are not what is varying. The flat scan alone came out at 26.28 ms in the first run and at 35.39 ms in the sweep an hour later, which is a spread of a third on a measurement of the same bytes by the same code on an idle machine that nobody else is using.
+
+Why is not a mystery. It is a hybrid part with eight performance cores and sixteen efficiency cores, the job is not pinned to either kind, it runs under Windows where the boost state and the processor affinity cannot be read by an unprivileged process, and boost is on. A run free to move between a performance core and an efficiency core produces a distribution with two modes, and a confidence interval over two modes describes neither of them. The same reasoning is why the iris-bench eligibility gates cap that machine under Windows at ratios rather than durations: not because the numbers are wrong, but because nothing checked whether the clock was steady, and being unable to see a setting is not evidence that the setting is right.
+
+**What this does to the gate.** The gate does not move. Three percent is still three percent, and the reason the number came out the way it did is a defect in how it was measured rather than an argument about where the line should be.
+
+What changes is that the gate is judged across whole runs and not inside one. Twenty four repeats put the standard error on the median at about one percentage point, so what the fleet can say today is that the compiled windowed shape costs around one percent on this machine and is not distinguishable from three. That is not a pass and it is not a failure. It is the largest claim this hardware supports.
+
+**So #26 is not confirmed reachable and it is not replaced.** The M4 gate stays at three percent on a resident local file, because the threshold was never the problem. The measurement was. What #26 gains is a protocol: it is judged on the median of repeated whole runs with the interval taken across them, and a single run reporting a within-run interval does not settle it in either direction.
+
+M4 is unblocked on that basis. The design question the failing rows seemed to raise turned out not to exist: no shape of windowed loop has been shown to cost anything on x86-64 that survives being measured properly, and the one shape that looked like it did was the hand written probe rather than the design. What is left is a measurement problem, and it belongs to iris-bench rather than here. It is the noise floor issue in B0 and the bare metal Linux issue on the workstation class, and until one of those lands, the fleet's honest resolution on this question is about one percentage point per two dozen runs.
 
 ## M1, the ABI and a decoder that does nothing interesting
 
