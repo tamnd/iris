@@ -17,6 +17,12 @@ bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+object_store = { workspace = true, optional = true }
+# rt alone. The object store source spawns its request onto a runtime the host already has and never
+# creates one of its own, because a library that starts a runtime takes a scheduling decision that
+# belongs to the program it was linked into.
+tokio = { workspace = true, features = ["rt"], optional = true }
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
@@ -24,9 +30,32 @@ libc.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
+object_store = { workspace = true }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+
+# The suite needs the suite. Declaring the target rather than letting it be discovered is what lets
+# it be skipped when the feature is off, instead of failing to compile for a caller who did not ask
+# for the test helpers.
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+required-features = ["conformance"]
+
+[[test]]
+name = "broken"
+path = "tests/broken.rs"
+required-features = ["conformance"]
 
 [features]
+# The object store implementation of RangeSource, and the two dependencies it needs. Off by default,
+# because a host that reads local files should not link an HTTP stack and an async runtime to do it.
+object-store = ["dep:object_store", "dep:tokio"]
+
+# The conformance suite, which is the thing that makes RangeSource a contract rather than a shape. It
+# ships in the library rather than in this crate's tests so that an implementation living in another
+# repository can be held to the same checks as the three in here.
+conformance = []
 # Exposes the accessibility probe the window tests use. It is a feature rather than a public function
 # because "can this address be read" is a question about a mapping, not something a caller of a data
 # source should be reaching for, and the honest way to answer it is a syscall that reports a fault.

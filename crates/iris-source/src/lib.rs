@@ -3,9 +3,16 @@
 //! A decoder declares the byte ranges it needs and the host serves them. That inversion is what lets
 //! the same decoder run against a local file, a page cache, and an object store.
 //!
-//! What exists so far is [`Window`], the sliding file view the host maps ranges through. The
-//! `RangeSource` trait it will sit behind, and the object store implementation of it, belong to a
-//! later milestone. See `docs/ROADMAP.md`.
+//! [`RangeSource`] is that trait. Three implementations come with it: [`MemorySource`] over bytes
+//! that are already resident, [`FileSource`] over a local file read through the sliding [`Window`],
+//! and `ObjectSource` over an object store, behind the `object-store` feature. They are
+//! interchangeable because they all pass the same suite in [`conformance`], which is public so that
+//! a fourth implementation written somewhere else can be held to the same promises.
+//!
+//! The one thing to know before reading the trait is that asking for a range does not wait. It
+//! either hands back the bytes or says they are not here yet, and the host does something else in
+//! between. That is what a single threaded host needs and it is what the resumable path in the
+//! sandbox is built on. See the [`source`] module for the rest.
 //!
 //! # Unsafe code
 //!
@@ -18,11 +25,32 @@
 //! is sound, and the stress test in `tests/window.rs` runs thousands of remap cycles on all four
 //! supported platforms on every change.
 
+pub mod memory;
+pub mod source;
+
+pub use memory::MemorySource;
+pub use source::{Fetch, RangeSource, SourceError, bounds, read_blocking};
+
+#[cfg(feature = "conformance")]
+pub mod conformance;
+
+#[cfg(feature = "object-store")]
+pub mod object;
+
+#[cfg(feature = "object-store")]
+pub use object::ObjectSource;
+
 #[cfg(any(unix, windows))]
 mod sys;
 
 #[cfg(any(unix, windows))]
+pub mod file;
+
+#[cfg(any(unix, windows))]
 pub mod window;
+
+#[cfg(any(unix, windows))]
+pub use file::FileSource;
 
 #[cfg(any(unix, windows))]
 pub use window::{DEFAULT_SPAN, Window, WindowError};
