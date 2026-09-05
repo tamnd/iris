@@ -10,6 +10,8 @@ Three implementations ship with it. `MemorySource` over bytes that are already r
 
 `Segment` is not a fourth implementation but an adapter over any of them. It presents a byte range of one source as a source addressed from zero, which is how a decoder is shown the data section of a container and nothing else when the container is too large to hold.
 
+`Readahead` is the other adapter. A decoder walking a column asks for it in the pieces the encoding is written in, and over a network those pieces are forty round trips where one would do, so this fetches a block at a time and serves the run out of it. It keeps a few blocks rather than one, because a columnar scan reads a piece of each column in turn and a single block is thrown away by every turn. How far ahead to read and how many runs to follow are numbers the host picks, and a decoder has no way to influence them or to find out that there are any.
+
 `Window` is the piece underneath the file source. It reserves a fixed span of address space once, maps part of a file into it, and moves that part when a request falls outside it, so the address space a dataset costs is chosen by the host rather than by the size of the data. When the view moves, every address the old view covered stops being readable rather than returning bytes from the part of the file that used to be there, which is the property the whole type exists for: a stale read produces an answer that is wrong and looks right, and nothing downstream can catch it.
 
 This is the only crate in the workspace that contains unsafe code. Every other one carries `#![forbid(unsafe_code)]`.

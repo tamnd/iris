@@ -31,6 +31,15 @@
 //! That half is not portable and does not pretend to be: it reads a Prometheus text endpoint and
 //! knows the names of an S3 server's metrics. It is pointed at one by an environment variable and
 //! it says so when it is not.
+//!
+//! # The third gate
+//!
+//! The last test here is the measurement half of #28. Reading ahead of a scan is only worth having
+//! if it makes a scan cheaper, and whether it does depends on the access pattern rather than on the
+//! idea, so it is measured against the pattern this fixture actually produces rather than against a
+//! run of adjacent requests written to make it look good. The same scan is run twice over the same
+//! object, once with the source as it is and once with the same source read ahead of, and the two
+//! are compared on request count and on the answer they came back with.
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -39,7 +48,7 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use iris_format::Digest;
 use iris_runtime::Runtime;
-use iris_source::{FileSource, ObjectSource, RangeSource};
+use iris_source::{FileSource, ObjectSource, RangeSource, Readahead};
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt as _};
@@ -61,6 +70,12 @@ const BATCH_ROWS: u64 = 4_096;
 
 /// Where this gate keeps its fixture, which the CI job removes after a run that failed.
 const SCRATCH: &str = "gate-object";
+
+/// How far the readahead gate reads ahead.
+///
+/// Several times a batch of one column and a fraction of a whole column, so that a run of requests
+/// down one column is coalesced and the whole column is still not dragged in by the first ask for it.
+const DEPTH: usize = 128 * 1024;
 
 /// What this run was told about the store, or nothing if it was told nothing.
 ///
@@ -245,6 +260,97 @@ fn one_decoder_reads_a_file_and_an_object_and_says_the_same_thing() {
             assert_eq!(*value, cell(column, row), "column {column} row {row}");
         }
     }
+
+    tokio
+        .block_on(store.delete(&key))
+        .expect("the fixture is removed from the store");
+}
+
+#[test]
+#[ignore = "needs an S3 compatible endpoint, run by name from the object storage job"]
+fn reading_ahead_of_a_scan_costs_fewer_requests_for_the_same_answer() {
+    let endpoint = match Endpoint::from_env() {
+        Ok(endpoint) => endpoint,
+        Err(why) => panic!(
+            "this gate was run without an endpoint to run against: {why}. \
+             The object storage job in ci.yml starts one and exports the five variables."
+        ),
+    };
+
+    let builder = builder(ROWS, COLUMNS);
+    let bytes = builder.build().expect("a container this small always fits");
+
+    let runtime = Runtime::new()
+        .expect("the engine builds")
+        .with_max_batch_rows(BATCH_ROWS);
+
+    let tokio = tokio::runtime::Runtime::new().expect("a tokio runtime starts");
+    let store = endpoint.store();
+    let key = ObjectPath::from("readahead.iris");
+    tokio
+        .block_on(store.put(&key, bytes.into()))
+        .expect("the fixture uploads");
+
+    let _guard = tokio.enter();
+
+    // The same scan twice over the same object. The only difference between the two is what the host
+    // put in front of the source, which is the claim: a decoder cannot see this and does not change.
+    let plain = {
+        let object = tokio
+            .block_on(ObjectSource::open(Arc::clone(&store), key.clone()))
+            .expect("the object opens");
+        let mut dataset = runtime
+            .open_windowed(Box::new(object))
+            .expect("the container opens over the network");
+        let batches = dataset.scan().expect("the decoder runs over the network");
+        (columns(&batches, COLUMNS), dataset.last_scan())
+    };
+
+    let ahead = {
+        let object = tokio
+            .block_on(ObjectSource::open(Arc::clone(&store), key.clone()))
+            .expect("the object opens");
+        // One stream per column, because the pattern a columnar scan makes is one run per column
+        // moving forwards, and a single block is thrown away by every turn between them.
+        let source = Readahead::new(object, DEPTH)
+            .with_streams(usize::try_from(COLUMNS).expect("three columns fit in a usize"));
+        let mut dataset = runtime
+            .open_windowed(Box::new(source))
+            .expect("the container opens over the network");
+        let batches = dataset.scan().expect("the decoder runs over the network");
+        (columns(&batches, COLUMNS), dataset.last_scan())
+    };
+
+    // First, that it is the same scan. Coalescing that changes the answer is not coalescing, and a
+    // request count is only worth comparing between two runs that agree about what they read.
+    assert_eq!(
+        ahead.0, plain.0,
+        "the scan came back differently when the host read ahead of it"
+    );
+
+    let (plain, ahead) = (plain.1, ahead.1);
+    assert!(
+        plain.requests > 1,
+        "a scan that made {} requests without readahead has nothing to coalesce",
+        plain.requests
+    );
+    assert!(
+        ahead.requests * 2 <= plain.requests,
+        "reading ahead took the scan from {} requests to {}, which is not a reduction worth the \
+         memory it costs",
+        plain.requests,
+        ahead.requests
+    );
+
+    // And it did not buy that by moving the data twice. A full scan reads the whole data section
+    // whichever way it is served, so the two byte counts are the same number plus whatever the last
+    // block of each run overshot by.
+    assert!(
+        ahead.bytes <= plain.bytes * 2,
+        "reading ahead moved {} bytes where reading exactly what was asked for moved {}",
+        ahead.bytes,
+        plain.bytes
+    );
 
     tokio
         .block_on(store.delete(&key))

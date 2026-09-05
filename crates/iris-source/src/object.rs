@@ -19,8 +19,12 @@
 //! This keeps whatever it last fetched and nothing else. A request that falls inside the held block
 //! is free, and one that does not starts a fetch and drops any request already in flight for a
 //! different range. That is the smallest thing that satisfies the trait, and it is deliberately not
-//! a cache: coalescing neighbouring requests and prefetching ahead of a scan are host side policy,
-//! they are worth measuring rather than guessing, and they are issue #28.
+//! a cache.
+//!
+//! It also never asks for more than it was asked for. Reading ahead of a scan so that a run of small
+//! adjacent requests costs one trip is [`crate::Readahead`], which goes in front of this rather than
+//! inside it, because how far ahead to read is a decision about the host and not about object stores.
+//! A host that wants it wraps this in one and picks the depth.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};

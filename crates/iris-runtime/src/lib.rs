@@ -98,10 +98,11 @@
 //!
 //! # What it does not do yet
 //!
-//! A windowed scan asks for one range at a time and waits for it. Coalescing neighbouring requests
-//! and reading ahead of the decoder are the things that turn that from correct into fast, and they
-//! belong on the host side of the boundary because the decoder is not allowed to know how far away
-//! its bytes are.
+//! Nothing here reads ahead on its own. A source handed to [`Runtime::open_windowed`] is used
+//! exactly as it is, so a scan makes whatever requests the decoder asks for. `iris_source::Readahead`
+//! is the adapter that turns a run of small adjacent requests into one, and a host puts it in front
+//! of its source and picks the depth. That is deliberately not done here: how far ahead to read
+//! depends on what the bytes are behind, and this crate is handed a source without being told.
 //!
 //! Only time is metered. A decoder that allocates until the engine refuses gets an ordinary trap
 //! rather than a message about memory, and a decoder that spends its whole deadline on every call

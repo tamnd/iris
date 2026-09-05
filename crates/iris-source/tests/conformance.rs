@@ -18,7 +18,7 @@
 use std::fs::File;
 use std::io::Write as _;
 
-use iris_source::{FileSource, MemorySource, conformance};
+use iris_source::{FileSource, MemorySource, Readahead, conformance};
 
 /// Large enough to cross several pages and to make a small window slide, small enough that the
 /// suite is a fraction of a second.
@@ -76,6 +76,33 @@ fn a_file_source_over_an_empty_file_is_conformant() {
         SPAN,
     )
     .expect("a window over an empty file");
+    conformance::check(&mut source, &[]);
+}
+
+/// Readahead in front of a source it can actually help.
+///
+/// The interesting one, because reading ahead changes which ranges are asked for underneath and the
+/// promises are about the ranges that come back. A block that is off by one, or a block that is
+/// reused for a range it does not cover, is a source that answers with the wrong bytes, and the
+/// arithmetic corpus is what turns that into a failed comparison rather than a plausible answer.
+#[test]
+fn reading_ahead_of_a_window_that_has_to_slide_is_conformant() {
+    let contents = corpus(CORPUS);
+    let file = corpus_file(&contents);
+
+    let inner = FileSource::with_span(File::open(file.path()).expect("reopening the corpus"), SPAN)
+        .expect("a window over the corpus");
+    // Deeper than the suite's largest request and shallower than the window, so blocks are real and
+    // the source underneath can still serve them.
+    let mut source = Readahead::new(inner, SPAN / 4);
+    conformance::check(&mut source, &contents);
+}
+
+#[test]
+fn reading_ahead_of_nothing_is_conformant() {
+    // An empty source has nothing ahead of anything, which is the case where a block length would
+    // come out zero if it were calculated rather than short circuited.
+    let mut source = Readahead::new(MemorySource::new(Vec::new()), 4096);
     conformance::check(&mut source, &[]);
 }
 
