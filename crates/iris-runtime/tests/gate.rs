@@ -19,7 +19,18 @@
 //! The nested cargo gets its own target directory. Cargo's lock is per target directory, so
 //! building into the one the outer cargo is holding would deadlock rather than fail, which is a
 //! much worse way to find out.
+//!
+//! It also gets a lock of its own, and that one is not obvious. nextest runs every test in its own
+//! process, so the nine tests in this file are nine cargo invocations against one target directory.
+//! Cargo's lock makes them build one at a time, which is all it promises. It does not cover the
+//! reads afterwards, and cargo finishes a build by moving the example from `deps` to `examples`,
+//! which it does by removing the destination and linking it again. It does that every time, even
+//! when nothing needed compiling. So a process that has just released the lock and is reading the
+//! files can be reading them while the next process removes one, and the read fails with a missing
+//! file after cargo said it built it. The lock here is held across the build and the reads together,
+//! which is the only arrangement where what was built is still there to be read.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -72,6 +83,12 @@ fn modules() -> &'static Modules {
     MODULES.get_or_init(|| {
         let root = workspace_root();
         let target_dir = root.join("target").join("gate-wasm");
+
+        // Held until the end of this block, so that no other test process is part way through a
+        // build while this one reads what that build produced. See the note at the top of the file.
+        std::fs::create_dir_all(&target_dir).expect("creating the nested target directory");
+        let guard = File::create(target_dir.join("gate.lock")).expect("creating the build lock");
+        guard.lock().expect("taking the build lock");
 
         let mut cargo = Command::new(env!("CARGO"));
         cargo
