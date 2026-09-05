@@ -33,12 +33,16 @@ use std::ptr::NonNull;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, MEM_COALESCE_PLACEHOLDERS, MEM_COMMIT, MEM_PRESERVE_PLACEHOLDER,
-    MEM_RELEASE, MEM_REPLACE_PLACEHOLDER, MEM_RESERVE, MEM_RESERVE_PLACEHOLDER,
-    MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile3, PAGE_EXECUTE, PAGE_GUARD, PAGE_NOACCESS,
-    PAGE_READONLY, UnmapViewOfFile2, VirtualAlloc2, VirtualFree,
+    CreateFileMappingW, MEM_COMMIT, MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER,
+    MEM_RESERVE, MEM_RESERVE_PLACEHOLDER, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile3, PAGE_EXECUTE,
+    PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, UnmapViewOfFile2, VirtualAlloc2, VirtualFree,
 };
+// The odd one out. Every other placeholder flag is in Win32::System::Memory next to the calls that
+// take them, and this one is in SystemServices, which is where the Windows metadata puts constants
+// that no signature in the API surface mentions by type. It is the reason this crate takes a feature
+// it otherwise has no use for, which is still a better trade than writing the number out here.
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+use windows_sys::Win32::System::SystemServices::MEM_COALESCE_PLACEHOLDERS;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 fn system_info() -> SYSTEM_INFO {

@@ -59,8 +59,14 @@ wasmparser = "0.258.0"
 # no COM, and windows-sys is the binding layer without the object model on top.
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
+  # CreateFileMappingW takes a SECURITY_ATTRIBUTES pointer, which this passes as null, and a
+  # signature that mentions the type needs the module that defines it even so.
+  "Win32_Security",
   "Win32_System_Memory",
   "Win32_System_SystemInformation",
+  # For MEM_COALESCE_PLACEHOLDERS alone, which is the one placeholder flag the Windows metadata does
+  # not put next to the calls that take it.
+  "Win32_System_SystemServices",
   "Win32_System_Threading",
 ] }
 wasmtime = { version = "48.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
