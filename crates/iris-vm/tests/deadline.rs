@@ -76,7 +76,10 @@ fn a_decoder_that_loops_forever_is_stopped() {
     let mut decoder = Decoder::instantiate(&program).expect("it instantiates fine, it is the scan");
 
     let started = Instant::now();
-    let err = decoder.scan(&[]).expect_err("the scan does not return");
+    let err = decoder
+        .scan(&[])
+        .wait()
+        .expect_err("the scan does not return");
     let waited = started.elapsed();
 
     assert!(
@@ -96,7 +99,10 @@ fn the_message_names_the_decoder_and_the_budget() {
         .expect("the text compiles");
     let mut decoder = Decoder::instantiate(&program).expect("it instantiates fine, it is the scan");
 
-    let err = decoder.scan(&[]).expect_err("the scan does not return");
+    let err = decoder
+        .scan(&[])
+        .wait()
+        .expect_err("the scan does not return");
     let Error::Deadline { decoder, limit } = &err else {
         panic!("a loop should be a deadline rather than {err}");
     };
@@ -157,7 +163,10 @@ fn metering_is_on_without_anyone_configuring_it() {
         .expect("the text compiles");
     let mut decoder = Decoder::instantiate(&program).expect("it instantiates fine, it is the scan");
 
-    let err = decoder.scan(&[]).expect_err("the scan does not return");
+    let err = decoder
+        .scan(&[])
+        .wait()
+        .expect_err("the scan does not return");
     assert!(
         matches!(err, Error::Deadline { .. }),
         "the default should meter rather than {err}"

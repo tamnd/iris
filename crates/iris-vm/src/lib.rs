@@ -7,7 +7,7 @@
 //! # What it does
 //!
 //! [`Vm`] compiles, [`Program`] is the compiled module, and [`Decoder`] is one instance of it having
-//! a conversation with the host. The conversation is four calls out and one call in, and all five
+//! a conversation with the host. The conversation is four calls out and two calls in, and all six
 //! are written down in `docs/ABI.md`:
 //!
 //! | Direction | Call | What it is for |
@@ -17,6 +17,23 @@
 //! | Out | `iris_start() -> u64` | Send a `Hello`, get a `HelloAck` or a `Refusal` |
 //! | Out | `iris_scan() -> u64` | Send a `ScanRequest`, get nothing or a `Refusal` |
 //! | In | `iris.emit(ptr, len) -> u32` | One batch, as it is produced |
+//! | In | `iris.require_range(at, len, dst) -> u32` | Bytes the decoder does not have yet |
+//!
+//! # Pulling, and stopping
+//!
+//! `require_range` is the call that lets a decoder read a file it cannot hold. The decoder names the
+//! bytes it wants and a buffer of its own to put them in, and everything about how they are obtained
+//! stays on the host side of the boundary. What makes that workable rather than merely possible is
+//! that the host is allowed to answer later: if the source it attached with [`Decoder::attach`] does
+//! not have the bytes yet, the decoder is stopped where it stands and the host thread is handed
+//! back.
+//!
+//! That is why [`Decoder::start`] and [`Decoder::scan`] hand back a [`Running`] instead of an answer.
+//! [`Running::poll`] moves the call as far as it will go and returns either the answer or
+//! [`Progress::Suspended`], and nothing is lost in between: the guest's stack and every row it has
+//! already decoded are still there, so a scan that misses on ten thousand ranges suspends ten
+//! thousand times rather than starting again ten thousand times. A host with a thread to spare and
+//! no interest in any of this calls [`Running::wait`] and gets the old shape back in one word.
 //!
 //! # The deadline
 //!
@@ -52,11 +69,13 @@ mod batch;
 mod error;
 mod instance;
 mod module;
+mod run;
 
 pub use batch::RawBatch;
 pub use error::{Error, Result};
 pub use instance::{Decoder, Handshake};
 pub use module::{Program, Vm};
+pub use run::{Progress, Running};
 
 /// The version of this crate, as reported by build metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

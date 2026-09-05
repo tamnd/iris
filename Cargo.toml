@@ -73,7 +73,7 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_SystemServices",
   "Win32_System_Threading",
 ] }
-wasmtime = { version = "48.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmtime = { version = "48.0.1", default-features = false, features = ["async", "cranelift", "runtime", "std"] }
 
 criterion = "0.8.2"
 insta = "1.48.0"

@@ -62,8 +62,14 @@
 //!
 //! The two that return a `u64` return an answer packed as address in the high half and length in
 //! the low half, or zero for no answer at all. Batches do not come back that way. They go out
-//! through the one import, `iris.emit(ptr, len)`, as they are produced, because a scan that
-//! produces a thousand batches should not have to hold a thousand batches.
+//! through `iris.emit(ptr, len)` as they are produced, because a scan that produces a thousand
+//! batches should not have to hold a thousand batches.
+//!
+//! Bytes come in the same way and in the opposite direction. When a decoder asks for a range the
+//! host did not send up front, the SDK calls `iris.require_range(at, len, dst)` and the host fills
+//! a buffer the guest allocated. That call is allowed to take as long as the host needs, including
+//! stopping the module entirely and resuming it later, and nothing in the guest can tell that it
+//! happened.
 //!
 //! Every answer is a record, so a host reads its tag to find out what happened. A `HelloAck` means
 //! the decoder opened, a `Refusal` means it did not and says why, and nothing at all after a scan
@@ -72,15 +78,16 @@
 //! # What the host does not see
 //!
 //! Guest memory. The host never hands the guest an address and the guest never follows one, so
-//! there is no unsafe code in this crate at all. The host writes into buffers the guest allocated
-//! and told it about, which costs a copy of the source and buys a boundary where the failure mode
-//! of a lying host is a wrong answer rather than a corrupt guest.
+//! there is no unsafe code in this crate at all. `iris.require_range` did not change that: the
+//! decoder names a buffer it allocated itself and the host writes into that, exactly as it does for
+//! the source and for every record. The failure mode of a lying host stays a wrong answer rather
+//! than a corrupt guest.
 //!
-//! That trade is right for M1, where the source is resident and copied once. It stops being right
-//! at M4, where a window slides many times over a source too large to copy, and the file that has
-//! to change then is `guest.rs` rather than anybody's decoder. That is what [`Source`] is for: the
-//! signature already says a range may not be held across another range, so a decoder written today
-//! is already written against a window that moves.
+//! It also did not change any decoder. A decode loop written against [`Source`] in M1, when the
+//! whole file was copied in up front, is the same loop when the file is forty gigabytes in an
+//! object store and every range is a request. That is what the signature was for: `range` borrows
+//! from `&mut self`, so a range that cannot be held across the next one was already a rule the
+//! borrow checker enforced rather than a rule a decoder author had to remember.
 
 mod batch;
 mod decoder;
@@ -122,6 +129,11 @@ macro_rules! export_decoder {
                     const { ::core::cell::RefCell::new($crate::Instance::new()) };
                 static SOURCE: ::core::cell::RefCell<::std::vec::Vec<u8>> =
                     const { ::core::cell::RefCell::new(::std::vec::Vec::new()) };
+                // Where a range the host had to fetch lands. Separate from SOURCE because SOURCE is
+                // what the host copied in up front and this is what it sends one range at a time,
+                // and a decoder that reads a resident file never touches this one at all.
+                static SCRATCH: ::core::cell::RefCell<::std::vec::Vec<u8>> =
+                    const { ::core::cell::RefCell::new(::std::vec::Vec::new()) };
             }
 
             #[allow(
@@ -154,10 +166,12 @@ macro_rules! export_decoder {
             )]
             #[unsafe(no_mangle)]
             extern "C" fn iris_start() -> u64 {
-                SOURCE.with_borrow(|source| {
-                    INSTANCE.with_borrow_mut(|instance| {
-                        let mut source = $crate::Resident::new(source);
-                        $crate::guest::packed(instance.start(&mut source))
+                SOURCE.with_borrow(|resident| {
+                    SCRATCH.with_borrow_mut(|scratch| {
+                        INSTANCE.with_borrow_mut(|instance| {
+                            let mut source = $crate::guest::HostSource::new(resident, scratch);
+                            $crate::guest::packed(instance.start(&mut source))
+                        })
                     })
                 })
             }
@@ -168,11 +182,13 @@ macro_rules! export_decoder {
             )]
             #[unsafe(no_mangle)]
             extern "C" fn iris_scan() -> u64 {
-                SOURCE.with_borrow(|source| {
-                    INSTANCE.with_borrow_mut(|instance| {
-                        let mut source = $crate::Resident::new(source);
-                        let mut sink = $crate::guest::HostSink::new();
-                        $crate::guest::packed(instance.scan(&mut source, &mut sink))
+                SOURCE.with_borrow(|resident| {
+                    SCRATCH.with_borrow_mut(|scratch| {
+                        INSTANCE.with_borrow_mut(|instance| {
+                            let mut source = $crate::guest::HostSource::new(resident, scratch);
+                            let mut sink = $crate::guest::HostSink::new();
+                            $crate::guest::packed(instance.scan(&mut source, &mut sink))
+                        })
                     })
                 })
             }

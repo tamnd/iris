@@ -122,17 +122,48 @@ The ABI is records, and this is the small amount of WebAssembly around them. The
 | `iris_start() -> u64` | Reads the `Hello` in the input buffer and answers it |
 | `iris_scan() -> u64` | Reads the `ScanRequest` in the input buffer and runs it |
 
-There is one import, `iris.emit(ptr: u32, len: u32) -> u32`, which is how a batch record leaves the guest.
+There are two imports.
+
+| Import | What it does |
+| --- | --- |
+| `iris.emit(ptr: u32, len: u32) -> u32` | One batch record leaves the guest |
+| `iris.require_range(at: u64, len: u32, dst: u32) -> u32` | Bytes the guest does not have arrive in a buffer it named |
 
 The two calls that return a `u64` return an answer packed as an address in the high half and a length in the low half, with zero meaning no answer at all. That is a packed return rather than an out pointer because a wasm function can return a `u64` and cannot return two `u32` values, and because writing the answer through a pointer the host supplied would put the guest in the business of following host addresses, which is exactly what the next paragraph is about.
 
-The host never hands the guest an address and the guest never follows one. The host asks the guest for a buffer, the guest allocates it and says where it is, and the host writes into it. That costs a copy of the source and buys a boundary where the failure mode of a host that lies is a wrong answer rather than a corrupt guest. It is the right trade while the source is resident and copied once. It stops being the right trade at M4, where a window slides many times over a source too large to copy, and at that point `require-range` starts being used and this table grows. Decoders do not change, because a decoder never sees any of this.
+The host never hands the guest an address and the guest never follows one. The host asks the guest for a buffer, the guest allocates it and says where it is, and the host writes into it. That costs a copy and buys a boundary where the failure mode of a host that lies is a wrong answer rather than a corrupt guest. `iris.require_range` keeps that rule rather than being the exception to it: `dst` is a buffer the guest allocated and named, exactly like the one behind `iris_input`, so nothing changed except which side started the conversation.
+
+## Asking for bytes
+
+`iris.require_range` is how a decoder reads a file that does not fit in the guest, which is the whole of the `require-range` capability. The decoder gives the offset it wants, how many bytes, and where to put them, and gets back a status. Only zero means the bytes are there. The buffer is untouched for every other value, which is why a decoder that ignores the status reads whatever it wrote last rather than reading nothing.
+
+| Status | Name | What it means |
+| --- | --- | --- |
+| 0 | served | The bytes are in the buffer, all of them |
+| 1 | out of bounds | The range runs past the end of the source |
+| 2 | too large | No single request to this host can cover a range that long |
+| 3 | unavailable | The host tried and could not get the bytes |
+| 4 | no source | This host has nothing to serve ranges from |
+
+The four failures are not one failure with four labels. The first two are the decoder asking for the wrong thing, and both have an obvious next move: ask for a range that exists, or ask for this one in pieces. The scan carries on and the host is not involved. The last two are the host being unable to answer a reasonable question, and nothing the decoder does next will change that, so the host ends the scan rather than letting a decoder build an answer out of data it never received.
+
+There is deliberately no short read. A range is served in full or it is not served, because a decoder that gets fewer bytes than it asked for and does not check produces an answer that is wrong and looks right.
+
+## Suspension
+
+A host is allowed to answer `iris.require_range` later. When the bytes are not ready, the whole module stops inside the call, keeping its stack, its locals and everything it has decoded so far, and the host thread goes back to whatever the host wants to do with it. Polling the call again resumes the guest at the instruction after the import, with nothing replayed and nothing lost.
+
+This is what makes the pull model usable rather than merely possible. The alternative to suspending is blocking a thread per query in flight, which is the reason engines do not do it, or abandoning the call and running it again once the bytes arrive, which throws away the decode so far and does not terminate when the next range misses too. A decoder cannot tell any of this happened and does not have to be written for it.
+
+There is no limit on how many times one call may suspend. A scan that misses on every one of ten thousand ranges suspends ten thousand times, and the ten thousandth resumption costs what the first one did.
 
 ## The deadline
 
-Every call in that table is metered, and a call that does not return inside its deadline is stopped. This is not something a host switches on. A decoder that loops forever costs the query it was running, and the host thread that made the call is the one that gets control back.
+Every export in that table is metered, and a call that does not return inside its deadline is stopped. This is not something a host switches on. A decoder that loops forever costs the query it was running, and the host thread that made the call is the one that gets control back.
 
 A stopped call is not a refusal and it is not a trap the decoder can catch. The instance is finished, whatever it was in the middle of is gone, and the host is told which decoder it was by digest and how long it had. There is nothing a decoder can do about this and nothing it needs to do about it, because a decoder that returns never sees it.
+
+Waiting for a range does not spend the budget. The deadline is re-armed every time a call suspends, so what it bounds is how long a decoder runs between suspensions rather than how long the host took to fetch something. Any other choice would make a slow object store look exactly like a decoder that will not stop, and those want opposite responses.
 
 The budget is per call rather than per scan, because a call is where the host has control and is therefore the only place the question has an answer anybody can act on. A decoder that wants to do more work than one deadline allows should return what it has and be asked again, which is what batching is for. The `resumable` capability is where a decoder will say it can do that across a scan.
 
