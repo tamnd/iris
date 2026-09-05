@@ -281,7 +281,13 @@ fn thousands_of_slides_leak_nothing_and_never_go_stale() {
     let len = 8 << 20;
     let (_dir, path) = sample(len);
     let file = File::open(&path).expect("opening the sample");
-    let span = 64 * 1024;
+    // Two allocation units on Windows and many more everywhere else, which is the smallest span that
+    // can serve a read wherever it lands. A view starts on an allocation boundary, so a span of
+    // exactly one unit cannot cover a request that straddles one, and on Windows a unit is sixty
+    // four kibibytes. A span of one unit passed everywhere else and refused a read two thousand
+    // cycles in on Windows, which is the shape of a bug this test is otherwise looking for and is
+    // instead the span being too small to ask the question.
+    let span = 128 * 1024;
     let mut window = Window::with_span(file, span).expect("opening a window");
 
     let base = window.address();
@@ -290,11 +296,11 @@ fn thousands_of_slides_leak_nothing_and_never_go_stale() {
     // the difference at the end is only what the loop added.
     let handles_before = handles();
 
-    // A stride that is coprime with the span and with every alignment, so consecutive cycles land in
-    // different views and the sequence does not settle into a short cycle that only exercises two of
-    // them. Walking forwards then wrapping is also the access pattern a scan has, which is the one
-    // worth being sure about.
-    let stride = 40_961u64;
+    // Longer than the span, so every cycle lands outside the current view and has to slide, and odd,
+    // so it is coprime with every alignment on every platform and the walk does not settle into a
+    // short cycle that only exercises two views. Walking forwards then wrapping is also the access
+    // pattern a scan has, which is the one worth being sure about.
+    let stride = 163_841u64;
     let cycles = 4000u64;
     let read = 512usize;
 

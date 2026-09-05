@@ -162,9 +162,15 @@ impl Window {
     /// Reserves `span` bytes of address space for `file`, rounded up to what the platform allows.
     ///
     /// The span bounds the largest range this window can serve in one piece, so it has to be at
-    /// least as large as the largest request plus the alignment slack in front of it. A span of zero
-    /// is rounded up to one unit of allocation granularity rather than rejected, because a window
-    /// over an empty file is a reasonable thing to ask for and reserving nothing is not.
+    /// least as large as the largest request plus the alignment slack in front of it. A view starts
+    /// on an allocation boundary, so in the worst case that slack is one whole unit of allocation
+    /// granularity, which is sixty four kibibytes on Windows and the page size elsewhere. A span of
+    /// exactly one unit therefore serves a request only when it happens not to straddle a boundary,
+    /// and a span for a largest request of `n` wants to be at least `n` plus one unit.
+    ///
+    /// A span of zero is rounded up to one unit of allocation granularity rather than rejected,
+    /// because a window over an empty file is a reasonable thing to ask for and reserving nothing is
+    /// not.
     ///
     /// # Errors
     ///
