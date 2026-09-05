@@ -23,7 +23,7 @@ on:
         required: false
         default: fuzz_guard
         type: choice
-        options: [fuzz_guard, fuzz_format]
+        options: [fuzz_guard, fuzz_format, fuzz_window]
       seconds:
         description: How long to run it for, in seconds
         required: false

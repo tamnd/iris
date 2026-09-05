@@ -28,6 +28,15 @@ python3 ci/discipline.py
 
 That last one is the checks a compiler cannot do. A nightly toolchain in a workflow, a patched dependency in a manifest and a machine's hostname in a document all make the build work rather than break it, so each of them needs something that fails on it instead. It reads files and takes a second.
 
+If you are touching the platform code in `iris-source`, add the platform you are not on. `cargo check` cross compiles without a linker for the other target, so a Windows path can be compile checked from a Mac and a Unix path from Windows, and it catches a wrong module or a missing feature in seconds instead of in a CI run.
+
+```
+rustup target add x86_64-pc-windows-msvc
+cargo clippy -p iris-source --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings
+```
+
+This checks and does not run. The tests still have to run on a real machine of that kind, which is what the CI matrix is for.
+
 The toolchain is pinned in `rust-toolchain.toml` to Rust 1.98, which is also the minimum supported version, and the discipline check enforces that those two numbers are the same one. Raising it is a deliberate change, not something that happens because a dependency wanted it.
 
 Some further expectations, none of them surprising:

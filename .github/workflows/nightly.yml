@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz_guard, fuzz_format]
+        target: [fuzz_guard, fuzz_format, fuzz_window]
     steps:
       - uses: actions/checkout@v7
         with:
