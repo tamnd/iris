@@ -1,5 +1,8 @@
 [package]
-name = "iris"
+# The registry slot is irisdb because crates.io holds `iris` on its reserved name list and answers
+# any upload of it with a 400. The binary this installs is still called iris, which is the name a
+# user types, and every other crate in the workspace is still iris-something.
+name = "irisdb"
 description = "Command line tool for inspecting, verifying and decoding iris datasets."
 version.workspace = true
 edition.workspace = true
