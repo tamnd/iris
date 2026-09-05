@@ -121,4 +121,18 @@ mod tests {
         // Whatever offset a range of that length starts at, it fits in one view.
         assert!(largest + (sys::granularity() - 1) < source.span());
     }
+
+    #[test]
+    fn a_file_source_can_be_handed_to_another_thread_on_every_platform() {
+        // A windowed dataset takes its source as `Box<dyn RangeSource + Send>`, so a source that is
+        // Send on one platform and not on another is a source that compiles on one platform and not
+        // on another. That happened: Unix keeps a descriptor number, which is Send for free, and
+        // Windows keeps a section handle, which is a raw pointer and is not.
+        //
+        // This is a compile time check written as a test because there is nothing to run. It costs
+        // nothing and it fails where the mistake is rather than in whichever caller asked first.
+        const fn needs<T: Send + Sync>() {}
+        needs::<FileSource>();
+        needs::<Window>();
+    }
 }

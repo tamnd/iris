@@ -33,10 +33,15 @@ use std::ptr::NonNull;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, MEM_COMMIT, MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER,
-    MEM_RESERVE, MEM_RESERVE_PLACEHOLDER, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile3, PAGE_EXECUTE,
-    PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, UnmapViewOfFile2, VirtualAlloc2, VirtualFree,
+    CreateFileMappingW, MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER,
+    MEM_RESERVE, MEM_RESERVE_PLACEHOLDER, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile3,
+    PAGE_NOACCESS, PAGE_READONLY, UnmapViewOfFile2, VirtualAlloc2, VirtualFree,
 };
+// Only the readability probe below uses these, and it is only built for the tests that check a stale
+// read faults. Importing them unconditionally means a warning on every ordinary Windows build, which
+// is the sort of thing that trains people to stop reading warnings.
+#[cfg(feature = "probe")]
+use windows_sys::Win32::System::Memory::{MEM_COMMIT, PAGE_EXECUTE, PAGE_GUARD};
 // The odd one out. Every other placeholder flag is in Win32::System::Memory next to the calls that
 // take them, and this one is in SystemServices, which is where the Windows metadata puts constants
 // that no signature in the API surface mentions by type. It is the reason this crate takes a feature
@@ -123,6 +128,18 @@ impl fmt::Debug for Backing {
             .finish()
     }
 }
+
+// SAFETY: a section handle is a process wide kernel object with no thread affinity, and this owns
+// its handle outright from construction to drop. Nothing else holds it and the only thing done with
+// it is mapping a view, which takes &mut self on the window above.
+//
+// This is here because the Unix version keeps a descriptor number instead, which is an integer and
+// is therefore Send and Sync without anyone saying so. Leaving that asymmetry alone made a file
+// source movable between threads on one platform and not on the other, which is the kind of
+// difference that only turns up when a caller asks for the bound, and it did.
+unsafe impl Send for Backing {}
+// SAFETY: as above. &Backing permits reading the handle and the length and nothing else.
+unsafe impl Sync for Backing {}
 
 /// A contiguous run of addresses this process owns and nothing else may be given.
 pub(crate) struct Reservation {
