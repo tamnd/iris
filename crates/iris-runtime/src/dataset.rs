@@ -253,7 +253,10 @@ impl Dataset<'_> {
         decoder.load_source(self.source)?;
 
         let hello = self.hello();
-        let handshake = decoder.start(&record(|w| hello.encode(w))?)?;
+        // Waited on rather than polled. This host loads the whole source in up front, so a range
+        // never misses and the call never suspends, and the day it does the change is here rather
+        // than in any decoder.
+        let handshake = decoder.start(&record(|w| hello.encode(w))?).wait()?;
 
         // The decoder has already said yes by this point, and this is the host saying yes back.
         // Both sides check, because a decoder that agrees to terms it cannot meet and a host that
@@ -273,7 +276,7 @@ impl Dataset<'_> {
             row_count: count,
             ..ScanRequest::everything()
         };
-        let raw = decoder.scan(&record(|w| request.encode(w))?)?;
+        let raw = decoder.scan(&record(|w| request.encode(w))?).wait()?;
 
         let mut batches = Vec::with_capacity(raw.len());
         for batch in &raw {

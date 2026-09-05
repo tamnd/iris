@@ -69,6 +69,22 @@ pub enum Error {
     #[error("the decoder wrote a record that does not parse: {0}")]
     Record(#[from] iris_abi::Error),
 
+    /// The decoder asked for a range and the host could not produce it.
+    ///
+    /// This is the host's own failure rather than the decoder's, and it ends the scan. A decoder
+    /// that has been told a range is unavailable cannot make the bytes appear by asking again, and
+    /// one that carries on regardless is building an answer out of data it never received.
+    #[error("the host could not serve a range the decoder asked for: {0}")]
+    Source(String),
+
+    /// The decoder asked for a range and there is nothing attached to serve one.
+    ///
+    /// A decoder that pulls its own bytes was run by a host that never called
+    /// [`crate::Decoder::attach`]. It is separate from [`Error::Source`] because the fix is in the
+    /// host's setup rather than in whatever the source was talking to.
+    #[error("the decoder asked for a range and no source is attached")]
+    NoSource,
+
     /// The decoder declined, and said why.
     #[error("the decoder refused: {reason}: {detail}")]
     Refused {

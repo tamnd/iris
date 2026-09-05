@@ -1,29 +1,38 @@
-//! One running decoder, and the four calls a host makes into it.
+//! One running decoder, and the calls a host makes into it.
 
 use std::time::Duration;
 
-use iris_abi::{Message, Reader};
-use wasmtime::{Caller, Extern, Instance as WasmInstance, Linker, Memory, Store, Trap, TypedFunc};
+use iris_abi::{Message, RangeStatus, Reader};
+use iris_source::{Fetch, RangeSource, SourceError};
+use wasmtime::{
+    AsContextMut, Caller, Extern, Instance as WasmInstance, Linker, Memory, Store, Trap, TypedFunc,
+};
 
 use crate::batch::RawBatch;
 use crate::error::{Error, Result};
 use crate::module::Program;
+use crate::run::{Running, Yield, settled};
 
 /// What the host keeps alongside a running module.
 ///
 /// The batches live here rather than being returned from the import because a WebAssembly import
-/// returns a number, and the thing being returned is a list of buffers.
+/// returns a number, and the thing being returned is a list of buffers. The source lives here for a
+/// different reason: the import that serves ranges is handed a `Caller` and nothing else, so
+/// whatever it is going to read from has to be reachable through the store.
 #[derive(Default)]
 struct State {
     memory: Option<Memory>,
     batches: Vec<RawBatch>,
     failure: Option<Error>,
+    source: Option<Box<dyn RangeSource + Send>>,
+    /// The per-call budget, in epoch ticks, kept here so that serving a range can put it back.
+    ticks: u64,
 }
 
 /// A running decoder.
 ///
-/// The conversation is four calls and one import, all of them described in `docs/ABI.md`. Nothing in
-/// this type knows what a schema is or what Arrow is. It moves records in, moves records out, and
+/// The conversation is four calls and two imports, all of them described in `docs/ABI.md`. Nothing
+/// in this type knows what a schema is or what Arrow is. It moves records in, moves records out, and
 /// copies the buffers a batch points at while the guest is still stopped inside the call that
 /// produced them.
 pub struct Decoder {
@@ -45,7 +54,7 @@ impl core::fmt::Debug for Decoder {
 }
 
 impl Decoder {
-    /// Instantiates a compiled decoder and wires up the one import it has.
+    /// Instantiates a compiled decoder and wires up the imports it has.
     ///
     /// # Errors
     ///
@@ -57,7 +66,13 @@ impl Decoder {
         let deadline = program.deadline();
         let ticks = program.ticks();
 
-        let mut store = Store::new(program.engine(), State::default());
+        let mut store = Store::new(
+            program.engine(),
+            State {
+                ticks,
+                ..State::default()
+            },
+        );
 
         // Armed before the module is instantiated rather than after, because instantiating runs
         // whatever the module put in its start function, and that is guest code like any other.
@@ -67,9 +82,14 @@ impl Decoder {
         linker
             .func_wrap("iris", "emit", emit)
             .map_err(|err| trapped(&err, decoder, deadline))?;
+        linker
+            .func_wrap_async("iris", "require_range", require_range)
+            .map_err(|err| trapped(&err, decoder, deadline))?;
 
-        let instance = linker
-            .instantiate(&mut store, program.module())
+        // Instantiating goes through the asynchronous door because one of the two imports can
+        // suspend, and Wasmtime makes that a property of the store rather than of the call. Nothing
+        // here can actually park, which is what `settled` says.
+        let instance = settled(linker.instantiate_async(&mut store, program.module()))
             .map_err(|err| trapped(&err, decoder, deadline))?;
 
         let memory = memory_of(&instance, &mut store)?;
@@ -88,80 +108,118 @@ impl Decoder {
         })
     }
 
+    /// Gives the decoder somewhere to pull ranges from.
+    ///
+    /// This is the other half of [`Decoder::load_source`] and hosts pick one. Loading copies the
+    /// whole source in up front and suits a small file that is already in memory. Attaching leaves
+    /// the bytes where they are and lets the decoder ask for the parts it wants, which is the only
+    /// one of the two that works when the source is larger than the guest can address.
+    ///
+    /// A decoder that asks for a range with nothing attached is told [`RangeStatus::NO_SOURCE`],
+    /// which is a host bug rather than a decoder bug and says so.
+    pub fn attach(&mut self, source: Box<dyn RangeSource + Send>) {
+        self.store.data_mut().source = Some(source);
+    }
+
+    /// Takes the source back.
+    ///
+    /// Worth having because a source counts things. How many requests a scan made and how many bytes
+    /// came back are properties of the source, and a host that handed one over still wants to read
+    /// them afterwards.
+    pub fn detach(&mut self) -> Option<Box<dyn RangeSource + Send>> {
+        self.store.data_mut().source.take()
+    }
+
     /// Hands the decoder the whole source.
     ///
-    /// This is the M1 shape and it is the one thing here that does not survive contact with a large
-    /// dataset. The host asks the guest for a buffer and copies the source into it, which means the
-    /// source has to fit in the guest's address space and has to be copied once. Both of those go
-    /// away at M4, and neither of them changes any decoder, because a decoder only ever sees the
-    /// range calls the SDK makes on its behalf.
+    /// The M1 shape, and the one thing here that does not survive contact with a large dataset. The
+    /// host asks the guest for a buffer and copies the source into it, which means the source has to
+    /// fit in the guest's address space and has to be copied once. [`Decoder::attach`] is what
+    /// replaces it, and neither changes any decoder, because a decoder only ever sees the range
+    /// calls the SDK makes on its behalf.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Trap`] if the guest cannot allocate the buffer, and [`Error::OutOfBounds`]
     /// if the source is larger than a `u32`.
     pub fn load_source(&mut self, bytes: &[u8]) -> Result<()> {
-        let ptr = self.allocate(&self.source.clone(), bytes.len())?;
+        let source = self.source.clone();
+        let ptr = self.allocate(&source, bytes.len())?;
         self.write(ptr, bytes)
     }
 
     /// Sends the host's `Hello` and reads the answer back.
     ///
+    /// Opening is a call into the guest like any other, so a decoder that reads a footer in order to
+    /// know its own shape can suspend here just as it can in the middle of a scan.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Refused`] if the decoder declined, and [`Error::NotADecoder`] if it answered
     /// with something that is not a `HelloAck`.
-    pub fn start(&mut self, hello: &[u8]) -> Result<Handshake> {
-        let answer = self.call(&self.start.clone(), hello)?;
-        let mut reader = Reader::new(&answer);
-        match reader.message()? {
-            Message::HelloAck(ack) => Ok(Handshake {
-                abi_major: ack.abi_major,
-                abi_minor: ack.abi_minor,
-                required: ack.required,
-                optional: ack.optional,
-                decoder_id: ack.decoder_id.to_owned(),
-            }),
-            Message::Refusal(refusal) => Err(Error::refused(&refusal)),
-            _ => Err(Error::NotADecoder(
-                "the module answered a Hello with something that is not a HelloAck".to_owned(),
-            )),
-        }
+    pub fn start<'a>(&'a mut self, hello: &'a [u8]) -> Running<'a, Handshake> {
+        let start = self.start.clone();
+        Running::new(async move {
+            let answer = self.call(&start, hello).await?;
+            let mut reader = Reader::new(&answer);
+            match reader.message()? {
+                Message::HelloAck(ack) => Ok(Handshake {
+                    abi_major: ack.abi_major,
+                    abi_minor: ack.abi_minor,
+                    required: ack.required,
+                    optional: ack.optional,
+                    decoder_id: ack.decoder_id.to_owned(),
+                }),
+                Message::Refusal(refusal) => Err(Error::refused(&refusal)),
+                _ => Err(Error::NotADecoder(
+                    "the module answered a Hello with something that is not a HelloAck".to_owned(),
+                )),
+            }
+        })
     }
 
     /// Runs one scan and hands back every batch it produced.
+    ///
+    /// The call may suspend any number of times before it finishes. See [`Running`] for what that
+    /// means and why the answer does not simply arrive.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Refused`] if the decoder declined the request or declined partway through,
     /// which is why the batches are dropped on the error path: a scan that stopped early has
     /// produced a prefix of an answer, and a prefix of an answer is worse than no answer.
-    pub fn scan(&mut self, request: &[u8]) -> Result<Vec<RawBatch>> {
-        self.store.data_mut().batches.clear();
-        self.store.data_mut().failure = None;
+    pub fn scan<'a>(&'a mut self, request: &'a [u8]) -> Running<'a, Vec<RawBatch>> {
+        let scan = self.scan.clone();
+        Running::new(async move {
+            self.store.data_mut().batches.clear();
+            self.store.data_mut().failure = None;
 
-        let answer = self.call(&self.scan.clone(), request)?;
-        if let Some(err) = self.store.data_mut().failure.take() {
-            return Err(err);
-        }
-        if !answer.is_empty() {
-            let mut reader = Reader::new(&answer);
-            return match reader.message()? {
-                Message::Refusal(refusal) => Err(Error::refused(&refusal)),
-                _ => Err(Error::NotADecoder(
-                    "the module answered a scan with something that is not a Refusal".to_owned(),
-                )),
-            };
-        }
-        Ok(core::mem::take(&mut self.store.data_mut().batches))
+            let answer = self.call(&scan, request).await?;
+            if let Some(err) = self.store.data_mut().failure.take() {
+                return Err(err);
+            }
+            if !answer.is_empty() {
+                let mut reader = Reader::new(&answer);
+                return match reader.message()? {
+                    Message::Refusal(refusal) => Err(Error::refused(&refusal)),
+                    _ => Err(Error::NotADecoder(
+                        "the module answered a scan with something that is not a Refusal"
+                            .to_owned(),
+                    )),
+                };
+            }
+            Ok(core::mem::take(&mut self.store.data_mut().batches))
+        })
     }
 
-    fn call(&mut self, func: &TypedFunc<(), u64>, record: &[u8]) -> Result<Vec<u8>> {
-        let ptr = self.allocate(&self.input.clone(), record.len())?;
+    async fn call(&mut self, func: &TypedFunc<(), u64>, record: &[u8]) -> Result<Vec<u8>> {
+        let input = self.input.clone();
+        let ptr = self.allocate(&input, record.len())?;
         self.write(ptr, record)?;
         self.arm();
         let packed = func
-            .call(&mut self.store, ())
+            .call_async(&mut self.store, ())
+            .await
             .map_err(|err| trapped(&err, &self.identity, self.deadline))?;
         self.read_packed(packed)
     }
@@ -170,7 +228,7 @@ impl Decoder {
         let len = u32::try_from(len)
             .map_err(|_| Error::OutOfBounds("a buffer larger than a wasm32 guest can address"))?;
         self.arm();
-        func.call(&mut self.store, len)
+        settled(func.call_async(&mut self.store, len))
             .map_err(|err| trapped(&err, &self.identity, self.deadline))
     }
 
@@ -180,6 +238,10 @@ impl Decoder {
     /// control back and is therefore the only place the question "has this taken too long" has an
     /// answer a host can act on. A decoder that spends its whole budget on every call and returns
     /// is slow rather than hostile, and a slow decoder is a problem for whoever chose it.
+    ///
+    /// A suspension re-arms it too, in [`require_range`]. Time spent waiting on a range is the
+    /// host's own I/O and charging the decoder for it would mean a slow disk looking exactly like a
+    /// decoder that will not stop.
     fn arm(&mut self) {
         self.store.set_epoch_deadline(self.ticks);
     }
@@ -219,7 +281,115 @@ pub struct Handshake {
     pub decoder_id: String,
 }
 
-/// The one import a decoder has.
+/// The import a decoder asks for bytes through.
+///
+/// This is the range inversion, in one function. The decoder names bytes and a buffer of its own to
+/// put them in, and everything about how those bytes are obtained stays on this side: which file is
+/// open, what is cached, how many requests are in flight, what happens on a timeout.
+///
+/// It is asynchronous because a source is allowed to say "not yet". When that happens the guest is
+/// parked mid instruction with its stack intact and the host thread goes back to whoever polled the
+/// call. Nothing is replayed when it resumes, so a scan that misses on every one of its ranges costs
+/// one suspension per range rather than one restart per range.
+fn require_range(
+    mut caller: Caller<'_, State>,
+    (offset, len, dst): (u64, u32, u32),
+) -> Box<dyn Future<Output = u32> + Send + '_> {
+    Box::new(async move {
+        // Taken out of the store for the duration of the call. Serving a range needs the source and
+        // the guest's memory at the same time, and those are two fields of one struct, so borrowing
+        // the struct twice is not allowed and moving one of them out is the honest way to say that
+        // they are independent.
+        let Some(mut source) = caller.data_mut().source.take() else {
+            caller.data_mut().failure = Some(Error::NoSource);
+            return RangeStatus::NO_SOURCE.0;
+        };
+        let status = serve(&mut caller, source.as_mut(), offset, len, dst).await;
+        caller.data_mut().source = Some(source);
+        status.0
+    })
+}
+
+/// Waits for a range, however many times it takes, and copies it into the guest.
+async fn serve(
+    caller: &mut Caller<'_, State>,
+    source: &mut (dyn RangeSource + Send),
+    offset: u64,
+    len: u32,
+    dst: u32,
+) -> RangeStatus {
+    let want = len as usize;
+
+    // Readiness is established without keeping the bytes, and then one more call hands them back.
+    // The borrow the loop takes cannot be seen to end by a borrow checker that has not been told
+    // the iteration returned, and the second call is a comparison against a range that was just
+    // made ready. `iris-source` does the same thing in `read_blocking` for the same reason.
+    loop {
+        match source.range(offset, want) {
+            Ok(fetch) if fetch.is_ready() => break,
+            Ok(_) => {
+                // The budget goes back before the guest is parked. What it is there to catch is a
+                // decoder that will not return, and a decoder waiting on a range is not running at
+                // all, so charging it for the wait would turn a slow object store into a decoder
+                // that looks hostile.
+                let ticks = caller.data().ticks;
+                caller.as_context_mut().set_epoch_deadline(ticks);
+                Yield::once().await;
+            }
+            Err(err) => return refuse(caller, &err),
+        }
+    }
+
+    match source.range(offset, want) {
+        Ok(Fetch::Ready(bytes)) => write_range(caller, dst, bytes),
+        Ok(_) => refuse(
+            caller,
+            &SourceError::Flapped {
+                at: offset,
+                end: offset.saturating_add(u64::from(len)),
+            },
+        ),
+        Err(err) => refuse(caller, &err),
+    }
+}
+
+/// Copies a range the source produced into the buffer the guest named.
+fn write_range(caller: &mut Caller<'_, State>, dst: u32, bytes: &[u8]) -> RangeStatus {
+    let Some(memory) = caller.data().memory else {
+        caller.data_mut().failure = Some(Error::NotADecoder(
+            "the module asked for a range before its memory was wired up".to_owned(),
+        ));
+        return RangeStatus::UNAVAILABLE;
+    };
+
+    if memory.write(&mut *caller, dst as usize, bytes).is_err() {
+        caller.data_mut().failure = Some(Error::OutOfBounds(
+            "the guest asked for a range to be written outside its memory",
+        ));
+        return RangeStatus::UNAVAILABLE;
+    }
+    RangeStatus::SERVED
+}
+
+/// Turns a source's complaint into the number the guest sees, and decides whether the scan is over.
+///
+/// The split is between a decoder that asked for the wrong thing and a host that could not answer a
+/// reasonable question. The first two are answers: a decoder told its range is out of bounds or does
+/// not fit in one request can ask differently, and the scan carries on. The rest end the scan,
+/// because nothing the decoder does next will make the bytes appear and a decoder that keeps going
+/// is producing an answer from data it never received.
+fn refuse(caller: &mut Caller<'_, State>, error: &SourceError) -> RangeStatus {
+    match error {
+        SourceError::OutOfBounds { .. } => RangeStatus::OUT_OF_BOUNDS,
+        SourceError::TooLarge { .. } => RangeStatus::TOO_LARGE,
+        other => {
+            caller.data_mut().failure = Some(Error::Source(other.to_string()));
+            RangeStatus::UNAVAILABLE
+        }
+    }
+}
+
+/// The import a batch record leaves the guest through.
 ///
 /// Everything a batch points at is copied here, because here is the only place it is certainly
 /// still there. The guest is stopped inside this call, so nothing can reuse a buffer underneath the
