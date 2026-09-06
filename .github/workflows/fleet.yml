@@ -280,6 +280,102 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+  # The M5 remote scan comparison, which is the probe behind issue #31.
+  #
+  # A different machine from the two probes above, and on purpose. What this one publishes is request
+  # counts and byte counts, and those are the same whatever else the box is doing, so the argument
+  # that keeps a duration off a shared tenancy virtual machine does not apply to them. What it does
+  # apply to is the millisecond column, which is why the write up takes its durations from a machine
+  # with no neighbours and takes the counters from here. The Linux run also answers a question the
+  # write up would otherwise have to hand wave: whether the counts are a property of the mechanism or
+  # of the one operating system they were first measured on.
+  #
+  # Loopback, because a self hosted runner reaching a real bucket needs a credential this workflow
+  # does not have and should not have. That understates what a saved request is worth, by roughly the
+  # difference between a loopback round trip and a regional one, and the write up says so next to the
+  # numbers rather than leaving a reader to assume the endpoint was far away.
+  remote-scan:
+    name: Remote scan on ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ACCESS_KEY_ID: irisgate
+      AWS_SECRET_ACCESS_KEY: irisgatesecret
+      AWS_REGION: us-east-1
+      IRIS_TEST_BUCKET: iris-gate
+      MINIO: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: epyc-8c-24gb
+            runner: [self-hosted, linux, x64, epyc-8c-24gb]
+            jobs: 6
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+
+      # The same image and the same shape as the object storage job in the main workflow, so that a
+      # counter measured in one place and a counter measured in the other are measured against the
+      # same server.
+      - name: An S3 endpoint with a bucket in it
+        run: |
+          docker rm -f iris-minio-fleet || true
+          docker run -d --name iris-minio-fleet -p 9000:9000 \
+            -e "MINIO_ROOT_USER=$AWS_ACCESS_KEY_ID" \
+            -e "MINIO_ROOT_PASSWORD=$AWS_SECRET_ACCESS_KEY" \
+            "$MINIO" server /data
+          for _ in $(seq 1 60); do
+            docker exec iris-minio-fleet mc ready local && break
+            sleep 1
+          done
+          docker exec iris-minio-fleet mc alias set gate http://127.0.0.1:9000 \
+            "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
+          docker exec iris-minio-fleet mc mb --ignore-existing "gate/$IRIS_TEST_BUCKET"
+
+      - name: Run the probe
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+        run: >-
+          cargo run --release --locked -q -p iris-runtime --features probe --example remote_scan --
+          --rows 250000 --repeats 5 --json > remote-scan-${{ matrix.name }}.json
+
+      - name: Show it
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+        run: >-
+          cargo run --release --locked -p iris-runtime --features probe --example remote_scan --
+          --rows 250000 --repeats 5
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: remote-scan-${{ matrix.name }}
+          path: remote-scan-${{ matrix.name }}.json
+          retention-days: 30
+          if-no-files-found: error
+
+      # The probe deletes its own fixtures on the way out. This is for the run that did not get that
+      # far, where a container left behind holds a port and a couple of hundred megabytes until
+      # somebody notices.
+      - name: Clean up after a run that did not
+        if: always()
+        run: docker rm -f iris-minio-fleet || true
+
   # The guard cost probe, on the same one machine and for the same reason.
   #
   # This is the run the published number comes from. The hosted matrix in the M2 probe workflow says

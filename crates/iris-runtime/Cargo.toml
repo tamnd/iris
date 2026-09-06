@@ -53,8 +53,22 @@ thiserror.workspace = true
 # pool and have nothing to do with object storage, so the fix is to not build the HTTP stack for
 # them rather than to argue with tokio about a flag that was meant for it.
 [target.'cfg(not(loom))'.dev-dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
 iris-source = { workspace = true, features = ["object-store"] }
 object_store = { workspace = true, features = ["aws"] }
+# The remote scan probe's other side. `async` is what makes it read a Parquet file over the network
+# the way a query engine does rather than by downloading it first, and the two compression codecs
+# are there because a Parquet reader configured the way a deployment configures one uses them, and
+# comparing against one that does not would be comparing against a strawman.
+#
+# Not its `object_store` feature, which is the obvious thing to reach for and would pin a second
+# major version of object_store into the graph next to the one this workspace already uses. The
+# probe implements `AsyncFileReader` over the store it already has instead, which is a page of code
+# and has the better property besides: both halves of the comparison fetch their bytes through the
+# same instrument, so the byte counts are comparable because they were counted in one place.
+parquet = { workspace = true, features = ["arrow", "async", "snap", "zstd"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [features]
@@ -65,6 +79,10 @@ probe = []
 
 [[example]]
 name = "guard_cost"
+required-features = ["probe"]
+
+[[example]]
+name = "remote_scan"
 required-features = ["probe"]
 
 [lints]

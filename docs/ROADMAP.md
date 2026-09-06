@@ -212,7 +212,7 @@ Places to stop and reassess rather than push through.
 | M0 | Is a host call affordable? | Redesign to a shared window descriptor before writing code. **Settled: yes, 2.7 to 4.7 ns against a 100 ns gate** |
 | M0 | Does windowing tax the local path? | The first bet failed. Two code paths forever, or reconsider the inversion. **Open: passes on aarch64, fails on x86-64, being reproduced on hardware that is not shared** |
 | M2 | What does validation cost? | Over 15%, keep it on and make digest pinning the documented normal path. Do not ship it off. **Settled: 17 to 23% on strings against the tightest denominator there is, under 7% on everything else, on all four platforms. It stays on, iris-bench claim C0001** |
-| M5 | Do declared ranges win on object storage? | The main differentiator is gone and the design notes are wrong |
+| M5 | Do declared ranges win on object storage? | The main differentiator is gone and the design notes are wrong. **Settled: no. Projection pushdown is exact, but a page indexed Parquet reader over an uncompressed file moves the same bytes to within one percent, and over a compressed one it moves 2.7 times fewer. Ranges are not the differentiator. Carrying the decoder is. See `docs/REMOTE_SCAN.md`** |
 | M5 | Is the vectorisation gap architecture neutral? | If yes, M7 drops in priority and the story gets much better |
 
 ## Risks
