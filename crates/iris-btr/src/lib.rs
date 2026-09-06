@@ -24,8 +24,8 @@
 //! Every nullmap encoding, which is two that say the same thing about every row and two that are a
 //! Roaring bitmap of the rows that are the exception. On the value side, `UNCOMPRESSED` and
 //! `ONE_VALUE` for all three column types, `BP` and `PFOR` for integer columns, which are bit
-//! packing and bit packing with the values that did not fit kept to one side, `DICT` and `RLE` for
-//! integer and double columns, and `FREQUENCY` and `PSEUDODECIMAL` for double columns.
+//! packing and bit packing with the values that did not fit kept to one side, `DICT` for all three,
+//! `RLE` for integer and double columns, and `FREQUENCY` and `PSEUDODECIMAL` for double columns.
 //!
 //! The order that landed in was the framing and the trivial schemes first, so that getting from a
 //! part on disk to values in hand did not depend on any scheme being right, and then bit packing,
@@ -726,6 +726,115 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    /// The bytes of a string dictionary chunk.
+    ///
+    /// The header, then the entries laid out as a run of strings, then the codes. `entries` is the
+    /// strings themselves and the offset array is written from them, since a test that had to work
+    /// those out by hand would be checking its own arithmetic rather than the reader's.
+    fn text_dictionary(
+        compressed: bool,
+        codes_scheme: u8,
+        entries: &[&[u8]],
+        codes: &[u8],
+    ) -> Vec<u8> {
+        let header = (entries.len() + 1) * 4;
+        let mut slots = Vec::new();
+        let mut strings = Vec::new();
+        for entry in entries {
+            slots.extend_from_slice(
+                &u32::try_from(header + strings.len())
+                    .expect("an offset")
+                    .to_le_bytes(),
+            );
+            strings.extend_from_slice(entry);
+        }
+        slots.extend_from_slice(
+            &u32::try_from(header + strings.len())
+                .expect("an offset")
+                .to_le_bytes(),
+        );
+        slots.extend_from_slice(&strings);
+
+        let mut bytes = 0u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[u8::from(compressed), 0, 0, 0]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(entries.len()).expect("a count").to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(slots.len()).expect("an offset").to_le_bytes());
+        bytes.extend_from_slice(&[0, codes_scheme, 0]);
+        bytes.extend_from_slice(&slots);
+        bytes.extend_from_slice(codes);
+        bytes
+    }
+
+    #[test]
+    fn a_string_dictionary_gives_each_row_the_entry_its_code_names() {
+        // Entries of different lengths, and a code repeated, so a reader that took the offsets as
+        // written or that wrote a repeated string once would come out with the wrong bytes rather
+        // than the wrong count.
+        let data = text_dictionary(false, 0, &[b"aa", b"b", b"cccc"], &ints(&[2, 0, 2, 1]));
+        let bytes = part(2, 0, 2, 4, &data, &[]);
+        let chunk = Part::parse(&bytes)
+            .expect("a part")
+            .chunk(0)
+            .expect("a chunk");
+        let Column::Text(text) = chunk.decode().expect("values") else {
+            panic!("a string column")
+        };
+        assert_eq!(text.len(), 4);
+        assert_eq!(text.bytes(), b"ccccaaccccb");
+        assert_eq!(text.offsets(), [0, 4, 6, 10, 11]);
+    }
+
+    #[test]
+    fn a_string_dictionary_entry_can_be_empty() {
+        // An entry of no bytes is two offsets the same, which is the case a reader that told lengths
+        // apart from presence would get wrong. The nullmap is what says a row is null, not this.
+        let data = text_dictionary(false, 0, &[b"", b"z"], &ints(&[0, 1, 0]));
+        let bytes = part(2, 0, 2, 3, &data, &[]);
+        let chunk = Part::parse(&bytes)
+            .expect("a part")
+            .chunk(0)
+            .expect("a chunk");
+        let Column::Text(text) = chunk.decode().expect("values") else {
+            panic!("a string column")
+        };
+        assert_eq!(text.offsets(), [0, 0, 1, 1]);
+        assert_eq!(text.get(0), Some(&b""[..]));
+        assert_eq!(text.get(1), Some(&b"z"[..]));
+    }
+
+    #[test]
+    fn a_string_code_pointing_outside_the_dictionary_is_refused() {
+        let data = text_dictionary(false, 0, &[b"aa", b"b"], &ints(&[0, 9]));
+        let bytes = part(2, 0, 2, 2, &data, &[]);
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a string dictionary",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_dictionary_whose_own_strings_are_compressed_waits_on_fsst() {
+        // The flag says the entries went through FSST, which is a different thing from the scheme of
+        // that name and wants the same decoder. The error has to name FSST rather than the
+        // dictionary, or the conformance suite would report a case waiting on something that is
+        // already written.
+        let data = text_dictionary(true, 0, &[b"aa"], &ints(&[0]));
+        let bytes = part(2, 0, 2, 1, &data, &[]);
+        let part = Part::parse(&bytes).expect("a part");
+        let error = part.chunk(0).expect("a chunk").decode().unwrap_err();
+        assert!(
+            matches!(error, Error::UnsupportedScheme { code: 3, .. }),
+            "{error}"
+        );
+        assert!(format!("{error}").contains("FSST"), "{error}");
     }
 
     #[test]

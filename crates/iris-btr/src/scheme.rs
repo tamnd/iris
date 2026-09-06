@@ -89,6 +89,9 @@ const DICT: u8 = 2;
 /// strings.
 const RLE: u8 = 3;
 
+/// The code for `FSST`, which is a string scheme and shares its byte with numeric `RLE`.
+const FSST: u8 = 3;
+
 /// The code for `FREQUENCY` on a double column.
 ///
 /// Integer columns have a scheme of the same name at a different code, which the reference marks as
@@ -192,6 +195,7 @@ fn text(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Strings> {
     match code {
         UNCOMPRESSED => uncompressed_text(data, rows),
         ONE_VALUE => one_text(data, rows),
+        DICT => text_dictionary(data, rows, level),
         _ => Err(missing(ColumnType::String, code)),
     }
 }
@@ -661,7 +665,21 @@ fn uncompressed_text(data: &[u8], rows: usize) -> Result<Strings> {
             available: data.len().saturating_sub(4),
         })?;
 
-    let header = rows
+    string_array(body, rows)
+}
+
+/// Reads a run of strings laid out the way the reference lays every run of strings out.
+///
+/// An offset an entry plus one on the end, and then the bytes. The offsets count from the start of
+/// the offset array rather than from the start of the bytes, and they come back counted from the
+/// bytes, because that is what a reader of the column wants and the rebasing has to happen
+/// somewhere. It is the same shape whether the run is the rows of a column or the entries of a
+/// dictionary, which is why this is not written twice.
+///
+/// `count` may have come out of the stream, so the offset array is measured against the bytes that
+/// are really there before anything is sized from it.
+fn string_array(body: &[u8], count: usize) -> Result<Strings> {
+    let header = count
         .checked_add(1)
         .and_then(|slots| slots.checked_mul(4))
         .ok_or(Error::Overrun {
@@ -677,9 +695,9 @@ fn uncompressed_text(data: &[u8], rows: usize) -> Result<Strings> {
         });
     }
 
-    let mut offsets = Vec::with_capacity(rows + 1);
-    for row in 0..=rows {
-        let slot = read_u32(body, row * 4, "a string offset")?;
+    let mut offsets = Vec::with_capacity(count + 1);
+    for entry in 0..=count {
+        let slot = read_u32(body, entry * 4, "a string offset")?;
         let slot = usize::try_from(slot).unwrap_or(usize::MAX);
         // Rebased onto the bytes. A slot pointing into the offset array itself, or past the end of
         // what the chunk holds, is a part that does not describe itself.
@@ -695,6 +713,83 @@ fn uncompressed_text(data: &[u8], rows: usize) -> Result<Strings> {
     }
 
     Ok(Strings::new(offsets, body[header..].to_vec()))
+}
+
+/// Where a string dictionary's own bytes start inside the chunk data.
+///
+/// `DynamicDictionaryStructure` is a word, a bool, three more words, a word, and then three bytes.
+/// Twenty seven rather than the twenty eight the struct measures, for the reason the other headers
+/// here are one short too: `data` is declared straight after the last of those bytes and the padding
+/// that rounds the struct up is not part of it.
+const TEXT_DICTIONARY: usize = 27;
+
+/// Reads a dictionary encoded string column.
+///
+/// A dictionary of the distinct strings and a code a row, where a row's string is the entry its code
+/// names. The dictionary sits at the front and is laid out the way any run of strings is, and the
+/// codes are an integer column after it.
+///
+/// The reference has a second path through this, which decodes the codes as runs and writes a
+/// repeated string once rather than once a row. A flag in the header says which path was taken and
+/// this does not read it, because it chooses between two ways of doing the same thing rather than
+/// between two layouts. The run length encoding it needs is in the codes column either way, and
+/// decoding that column the ordinary way gives the codes the fast path would have expanded to.
+fn text_dictionary(data: &[u8], rows: usize, level: u32) -> Result<Strings> {
+    let compressed = byte(data, 4, "a string dictionary")? != 0;
+    let entries = read_u32(data, 16, "a string dictionary")?;
+    let entries = usize::try_from(entries).unwrap_or(usize::MAX);
+    let offset = read_u32(data, 20, "a string dictionary")?;
+    let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+    let codes_scheme = byte(data, 25, "a string dictionary")?;
+
+    // The dictionary's own strings can be `FSST` compressed, which is a different thing from the
+    // scheme of that name but wants the same decoder. So this waits on `FSST` rather than on
+    // anything to do with dictionaries, and says so, because that is what a reader needs to know.
+    if compressed {
+        return Err(missing(ColumnType::String, FSST));
+    }
+
+    // The dictionary runs from the front of the header's bytes to wherever the codes start, so the
+    // offset that says where the codes are is also what bounds the strings.
+    let stored = data
+        .get(TEXT_DICTIONARY..)
+        .and_then(|rest| rest.get(..offset))
+        .ok_or(Error::Overrun {
+            what: "a string dictionary",
+            claimed: offset,
+            available: data.len().saturating_sub(TEXT_DICTIONARY),
+        })?;
+    let dictionary = string_array(stored, entries)?;
+
+    let at = TEXT_DICTIONARY.saturating_add(offset);
+    let rest = data.get(at..).ok_or(Error::Overrun {
+        what: "a string dictionary",
+        claimed: at,
+        available: data.len(),
+    })?;
+    let codes = integers(codes_scheme, rest, rows, level + 1)?;
+
+    let mut offsets = Vec::with_capacity(rows + 1);
+    let mut bytes = Vec::new();
+    for code in codes {
+        let entry = usize::try_from(code)
+            .ok()
+            .and_then(|code| dictionary.get(code))
+            .ok_or(Error::Malformed {
+                what: "a string dictionary",
+                why: "a row's code is not one of the entries it holds",
+            })?;
+        offsets.push(u32::try_from(bytes.len()).map_err(|_| Error::Malformed {
+            what: "a string dictionary",
+            why: "its rows come to more bytes than an offset can count",
+        })?);
+        bytes.extend_from_slice(entry);
+    }
+    offsets.push(u32::try_from(bytes.len()).map_err(|_| Error::Malformed {
+        what: "a string dictionary",
+        why: "its rows come to more bytes than an offset can count",
+    })?);
+    Ok(Strings::new(offsets, bytes))
 }
 
 /// Reads a string column where every row holds the same string.
