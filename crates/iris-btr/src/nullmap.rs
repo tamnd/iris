@@ -6,12 +6,12 @@
 //! which is a distinction worth being loud about: reading a flipped map as a regular one gives an
 //! answer for every row and gets every one of them backwards.
 //!
-//! Only the two constant forms are read here so far. The Roaring forms wait on the schemes that use
-//! them, since every fixture in the corpus that has a scattered nullmap also uses a scheme this
-//! crate does not decode yet, and a bitmap reader with nothing to read it for would be untested
-//! code that claims to work.
+//! All four are read. The bitmap itself is `CRoaring`'s serialisation rather than anything the
+//! reference wrote, so it lives in its own module and this one only decides what the set it hands
+//! back means.
 
 use crate::error::{Error, Result};
+use crate::roaring;
 
 /// How a nullmap is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,18 +78,28 @@ impl<'a> Nullmap<'a> {
     ///
     /// # Errors
     ///
-    /// If the encoding is a Roaring bitmap, which is not read yet, or is not one the reference
-    /// defines.
+    /// If the encoding is not one the reference defines, or if it is a Roaring bitmap the bytes do
+    /// not hold.
     pub fn presence(&self) -> Result<Presence> {
-        match self.kind()? {
+        let kind = self.kind()?;
+        let rows = usize::try_from(self.rows).map_err(|_| Error::Overrun {
+            what: "the row count",
+            claimed: usize::MAX,
+            available: self.bytes.len(),
+        })?;
+        match kind {
             Kind::AllPresent => Ok(Presence::All),
             Kind::AllNull => Ok(Presence::None),
-            // The bytes are here and untouched, so this is a missing decoder and not a missing
-            // input, which is what the error says.
-            Kind::Present | Kind::Absent => {
-                let _ = self.bytes;
-                let _ = self.rows;
-                Err(Error::UnsupportedNullmap { code: self.code })
+            Kind::Present => Ok(Presence::Each(roaring::read(self.bytes, rows)?)),
+            // The set holds the null rows, so every answer is the other way round. Getting this
+            // backwards would give a plausible answer for every row and get all of them wrong,
+            // which is why the two encodings are separate variants rather than a flag.
+            Kind::Absent => {
+                let mut each = roaring::read(self.bytes, rows)?;
+                for row in &mut each {
+                    *row = !*row;
+                }
+                Ok(Presence::Each(each))
             }
         }
     }

@@ -21,16 +21,17 @@
 //!
 //! # What is implemented
 //!
-//! `UNCOMPRESSED` and `ONE_VALUE`, for all three column types, and the two nullmap encodings that
-//! say the same thing about every row. That is the framing and the trivial cases: enough to get
-//! from a part on disk to values in hand without any of the answer depending on a scheme being
-//! right, so that everything after it is a scheme dropped into a frame that already works.
+//! Every nullmap encoding, which is two that say the same thing about every row and two that are a
+//! Roaring bitmap of the rows that are the exception. On the value side, `UNCOMPRESSED` and
+//! `ONE_VALUE` for all three column types, `BP` for integer columns, which is bit packing, and
+//! `DICT` for integer and double columns.
 //!
-//! On top of that, `BP` for integer columns, which is bit packing, and `DICT` for integer and
-//! double columns. Bit packing came first because most of the rest cascade through it: a dictionary
-//! stores its codes bit packed, a run length encoding stores its values bit packed, and so on. The
-//! packing itself is not the reference's own format but Daniel Lemire's `FastPFOR`, which the
-//! reference calls out to and stores the output of verbatim.
+//! The order that landed in was the framing and the trivial schemes first, so that getting from a
+//! part on disk to values in hand did not depend on any scheme being right, and then bit packing,
+//! because most of the rest cascade through it: a dictionary stores its codes bit packed, a run
+//! length encoding stores its values bit packed, and so on. Neither the packing nor the bitmap is
+//! the reference's own format. The first is Daniel Lemire's `FastPFOR` and the second is
+//! `CRoaring`, and the reference calls out to both and stores what they produced verbatim.
 //!
 //! Because schemes nest, decoding is written as a function per column type that takes a scheme code
 //! and a byte slice, rather than as something hanging off a chunk. A nested scheme has no chunk
@@ -54,6 +55,7 @@ mod error;
 mod fastpfor;
 mod nullmap;
 mod part;
+mod roaring;
 mod scheme;
 
 pub use column::{Column, Strings};
@@ -319,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn the_two_constant_nullmaps_are_read_and_the_roaring_ones_are_not_yet() {
+    fn all_four_nullmap_encodings_are_read() {
         let all = part(1, 0, 0, 2, &[9, 0, 0, 0], &[]);
         let chunk = Part::parse(&all)
             .expect("a part")
@@ -337,15 +339,31 @@ mod tests {
             Presence::None
         );
 
-        let scattered = part(1, 3, 0, 2, &[9, 0, 0, 0], &[0xff; 4]);
-        let chunk = Part::parse(&scattered)
+        // The same bitmap under both scattered encodings, holding row one and nothing else. Under
+        // the regular one that is the row that is present, and under the flipped one it is the row
+        // that is null, so the two answers have to come out opposite.
+        let mut map = vec![1u8];
+        map.extend_from_slice(&1u32.to_le_bytes());
+        map.extend_from_slice(&1u32.to_le_bytes());
+
+        let regular = part(1, 2, 0, 2, &[9, 0, 0, 0], &map);
+        let chunk = Part::parse(&regular)
             .expect("a part")
             .chunk(0)
             .expect("a chunk");
-        let error = chunk.nullmap().presence().unwrap_err();
-        assert!(
-            matches!(error, Error::UnsupportedNullmap { code: 3 }),
-            "{error}"
+        assert_eq!(
+            chunk.nullmap().presence().expect("presence"),
+            Presence::Each(vec![false, true])
+        );
+
+        let flipped = part(1, 3, 0, 2, &[9, 0, 0, 0], &map);
+        let chunk = Part::parse(&flipped)
+            .expect("a part")
+            .chunk(0)
+            .expect("a chunk");
+        assert_eq!(
+            chunk.nullmap().presence().expect("presence"),
+            Presence::Each(vec![true, false])
         );
     }
 

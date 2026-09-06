@@ -15,9 +15,9 @@
 //!
 //! Most of the corpus uses schemes this crate has not implemented. Skipping those quietly would let
 //! the suite pass while covering almost nothing, so a case is skipped only if the crate says so
-//! itself by returning `UnsupportedScheme` or `UnsupportedNullmap`, and the count of skipped cases
-//! is printed and checked. When a scheme lands, its cases stop being skipped without anyone editing
-//! a list, and the check on the count is what makes that a change somebody has to look at.
+//! itself by returning `UnsupportedScheme`, and the count of skipped cases is printed and checked.
+//! When a scheme lands, its cases stop being skipped without anyone editing a list, and the check on
+//! the count is what makes that a change somebody has to look at.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -168,7 +168,7 @@ fn every_case_this_crate_decodes_matches_the_reference_byte_for_byte() {
 
         let column = match chunk.decode() {
             Ok(column) => column,
-            Err(error @ (Error::UnsupportedScheme { .. } | Error::UnsupportedNullmap { .. })) => {
+            Err(error @ Error::UnsupportedScheme { .. }) => {
                 waiting
                     .entry(format!("{error}"))
                     .or_default()
@@ -177,17 +177,12 @@ fn every_case_this_crate_decodes_matches_the_reference_byte_for_byte() {
             }
             Err(error) => panic!("{}: {error}", case.name),
         };
-        let presence = match chunk.nullmap().presence() {
-            Ok(presence) => presence,
-            Err(error @ Error::UnsupportedNullmap { .. }) => {
-                waiting
-                    .entry(format!("{error}"))
-                    .or_default()
-                    .push(case.name.clone());
-                continue;
-            }
-            Err(error) => panic!("{}: {error}", case.name),
-        };
+        // Every nullmap encoding is read, so there is nothing here to be waiting on. An error from
+        // this is a real one and fails the case rather than skipping it.
+        let presence = chunk
+            .nullmap()
+            .presence()
+            .unwrap_or_else(|error| panic!("{}: {error}", case.name));
 
         assert_eq!(
             presence_bytes(&presence, case.rows),
@@ -233,7 +228,7 @@ fn every_case_this_crate_decodes_matches_the_reference_byte_for_byte() {
     // land, and it is deliberately an inequality rather than an equality so that implementing a
     // scheme does not fail the suite that was asking for it.
     assert!(
-        decoded >= 12,
+        decoded >= 13,
         "only {decoded} cases decoded, which is fewer than the schemes already implemented cover"
     );
 }

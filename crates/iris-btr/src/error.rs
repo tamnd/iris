@@ -77,13 +77,6 @@ pub enum Error {
         code: u8,
     },
 
-    /// A nullmap encoding this crate does not read yet.
-    #[error("nullmap encoding {code} is not implemented yet")]
-    UnsupportedNullmap {
-        /// The byte in the chunk header.
-        code: u8,
-    },
-
     /// A nullmap encoding the reference does not define.
     #[error("nullmap encoding {code} is not one the reference defines")]
     UnknownNullmap {
