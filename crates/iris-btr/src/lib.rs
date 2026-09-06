@@ -24,7 +24,7 @@
 //! Every nullmap encoding, which is two that say the same thing about every row and two that are a
 //! Roaring bitmap of the rows that are the exception. On the value side, `UNCOMPRESSED` and
 //! `ONE_VALUE` for all three column types, `BP` for integer columns, which is bit packing, and
-//! `DICT` for integer and double columns.
+//! `DICT` and `RLE` for integer and double columns.
 //!
 //! The order that landed in was the framing and the trivial schemes first, so that getting from a
 //! part on disk to values in hand did not depend on any scheme being right, and then bit packing,
@@ -180,6 +180,134 @@ mod tests {
             Err(Error::Malformed {
                 what: "a dictionary",
                 ..
+            })
+        ));
+    }
+
+    /// The bytes of a run length encoded chunk.
+    ///
+    /// A run count, the offset the counts start at, a scheme byte for the values and one for the
+    /// counts, then the values and then the counts. The offset is the length of the values, so it
+    /// is written from them rather than passed in.
+    fn runs(count: u32, values: &[u8], counts: &[u8]) -> Vec<u8> {
+        let mut bytes = count.to_le_bytes().to_vec();
+        bytes.extend_from_slice(
+            &u32::try_from(values.len())
+                .expect("a small run column")
+                .to_le_bytes(),
+        );
+        // Both nested columns uncompressed, so these tests are about the runs and not about
+        // whatever is under them.
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(values);
+        bytes.extend_from_slice(counts);
+        bytes
+    }
+
+    /// A little endian integer column, which is what both halves of a run length encoding are.
+    fn ints(values: &[i32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn a_run_length_encoded_column_repeats_each_value_its_run_length() {
+        // A value that comes back twice is deliberate. The reference records a run per transition
+        // rather than per distinct value, so the same value can hold two runs, and a reader that
+        // decided otherwise would be right on this data for the wrong reason.
+        let data = runs(3, &ints(&[7, -1, 7]), &ints(&[2, 3, 1]));
+        let bytes = part(3, 0, 0, 6, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert_eq!(
+            part.chunk(0).expect("a chunk").decode().expect("values"),
+            Column::Integer(vec![7, 7, -1, -1, -1, 7])
+        );
+    }
+
+    #[test]
+    fn a_run_length_encoded_column_holds_doubles_with_the_counts_still_integers() {
+        // The reference decodes both numeric types through one template, changing only the width of
+        // a value, and the counts stay an integer column either way. So the only thing that differs
+        // from the integer case is the column type byte and the width of what is in the values.
+        let values: Vec<u8> = [1.5f64, -0.25]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let data = runs(2, &values, &ints(&[1, 2]));
+        let bytes = part(3, 0, 1, 3, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert_eq!(
+            part.chunk(0).expect("a chunk").decode().expect("values"),
+            Column::Double(vec![1.5, -0.25, -0.25])
+        );
+    }
+
+    #[test]
+    fn runs_that_do_not_cover_every_row_are_refused() {
+        // The reference would leave the rows past the last run holding whatever the allocation held,
+        // so there is no answer here to match.
+        let data = runs(1, &ints(&[4]), &ints(&[2]));
+        let bytes = part(3, 0, 0, 5, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a run length encoded column",
+                why: "its runs do not cover every row of the chunk",
+            })
+        ));
+    }
+
+    #[test]
+    fn runs_that_cover_more_rows_than_the_chunk_holds_are_refused() {
+        // The reference writes a run straight into its output with no bound, so this is the part
+        // shape that would run it off the end of its own allocation.
+        let data = runs(1, &ints(&[4]), &ints(&[9]));
+        let bytes = part(3, 0, 0, 2, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a run length encoded column",
+                why: "its runs cover more rows than the chunk holds",
+            })
+        ));
+    }
+
+    #[test]
+    fn a_run_of_a_negative_number_of_rows_is_refused() {
+        // Counts are an integer column and integers are signed, so a negative one is a shape the
+        // format allows and the reference would take backwards.
+        let data = runs(1, &ints(&[4]), &ints(&[-1]));
+        let bytes = part(3, 0, 0, 1, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a run length encoded column",
+                why: "a run is a negative number of rows long",
+            })
+        ));
+    }
+
+    #[test]
+    fn more_runs_than_the_chunk_has_rows_is_refused_before_anything_is_decoded() {
+        // A run covers at least one row, so this cannot describe a real column. The run count is
+        // what the two nested columns get asked for, so it is checked before either of them is read
+        // and the values here are deliberately not there at all.
+        let data = runs(4000, &[], &[]);
+        let bytes = part(3, 0, 0, 2, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a run length encoded column",
+                why: "it has more runs than the chunk has rows",
             })
         ));
     }

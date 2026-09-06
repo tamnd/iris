@@ -84,6 +84,10 @@ const ONE_VALUE: u8 = 1;
 /// for strings than it does for the two numeric ones.
 const DICT: u8 = 2;
 
+/// The code for `RLE`, which is an integer and a double scheme and is something else entirely for
+/// strings.
+const RLE: u8 = 3;
+
 /// The code for `BP`, which is an integer scheme and has no counterpart for the other two types.
 const BP: u8 = 5;
 
@@ -123,6 +127,13 @@ impl Chunk<'_> {
     }
 }
 
+/// One of the per column type decoders below.
+///
+/// A scheme code, the bytes it covers, how many values are in them, and how far down the cascade
+/// this is. Named because a scheme that wraps another column has to be able to hand that column to
+/// whichever of the three is right for it, and a run length encoding is one shape whichever it gets.
+type Decoder<T> = fn(u8, &[u8], usize, u32) -> Result<Vec<T>>;
+
 /// Decodes an integer column held under `code`.
 ///
 /// Split out from [`Chunk::decode`] rather than written inside it because the reference nests
@@ -137,6 +148,7 @@ fn integers(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Vec<i32>> 
         ONE_VALUE => Ok(vec![one::<4, i32>(data, i32::from_le_bytes)?; rows]),
         BP => bit_packed(data, rows),
         DICT => dictionary::<4, i32>(data, rows, level, i32::from_le_bytes),
+        RLE => run_length(data, rows, level, integers),
         _ => Err(missing(ColumnType::Integer, code)),
     }
 }
@@ -148,6 +160,7 @@ fn doubles(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Vec<f64>> {
         UNCOMPRESSED => fixed(data, rows, f64::from_le_bytes),
         ONE_VALUE => Ok(vec![one::<8, f64>(data, f64::from_le_bytes)?; rows]),
         DICT => dictionary::<8, f64>(data, rows, level, f64::from_le_bytes),
+        RLE => run_length(data, rows, level, doubles),
         _ => Err(missing(ColumnType::Double, code)),
     }
 }
@@ -286,6 +299,101 @@ fn dictionary<const N: usize, T: Copy>(
                 })
         })
         .collect()
+}
+
+/// Where a run length encoded column's own bytes start inside the chunk data.
+///
+/// `RLEStructure` is two words and then a scheme byte for the values and a scheme byte for the
+/// counts. Unlike the dictionary the reference does not declare this one packed, and it does not
+/// need to be: the two words are already aligned and two bytes after them need no padding to sit
+/// where they say they do.
+const RUNS: usize = 10;
+
+/// Reads a run length encoded column.
+///
+/// The chunk holds the distinct run values and then the run lengths, each as a column in its own
+/// right with its own scheme byte, and the offset in the header says where the lengths start,
+/// measured from the end of that header. Both columns hold one entry a run. The lengths are always
+/// an integer column whatever the values are, so the values decoder is passed in and the counts are
+/// read by this module's integer path either way.
+///
+/// Two things about the reference are worth knowing here, and neither changes what a reader does.
+/// When it compresses, a null row extends the run it is in rather than breaking it, so a run can
+/// span rows that hold nothing and the nullmap is what says so. And after it writes the lengths it
+/// advances its write pointer by their size twice, with a comment of its own asking why, which
+/// leaves the part reporting itself larger than it is. Decoding never notices, because where the
+/// lengths are comes from the offset in the header and not from where the values ended.
+///
+/// The runs have to cover the chunk exactly. The reference writes each one straight into the output
+/// with no bound, so a part whose lengths add up to more than the chunk would run it off the end of
+/// its own allocation, and one that adds up to less would leave it comparing rows it never wrote.
+/// Neither has an answer to copy, so both are refused.
+fn run_length<T: Copy>(data: &[u8], rows: usize, level: u32, decode: Decoder<T>) -> Result<Vec<T>> {
+    let runs = read_u32(data, 0, "a run length encoded column")?;
+    let runs = usize::try_from(runs).unwrap_or(usize::MAX);
+    let offset = read_u32(data, 4, "a run length encoded column")?;
+    let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+    let values_scheme = *data.get(8).ok_or(Error::Truncated {
+        what: "a run length encoded column",
+        from: 8,
+        to: 9,
+        len: data.len(),
+    })?;
+    let counts_scheme = *data.get(9).ok_or(Error::Truncated {
+        what: "a run length encoded column",
+        from: 9,
+        to: 10,
+        len: data.len(),
+    })?;
+
+    // A run covers at least one row, so there is no reading a part that claims more runs than the
+    // chunk has rows. Checked before either nested column is decoded, because the run count is what
+    // those two get asked for and it is the field here a part would reach for to ask for work.
+    if runs > rows {
+        return Err(Error::Malformed {
+            what: "a run length encoded column",
+            why: "it has more runs than the chunk has rows",
+        });
+    }
+
+    let body = data.get(RUNS..).ok_or(Error::Overrun {
+        what: "a run length encoded column",
+        claimed: RUNS,
+        available: data.len(),
+    })?;
+    let at = RUNS.saturating_add(offset);
+    let rest = data.get(at..).ok_or(Error::Overrun {
+        what: "a run length encoded column",
+        claimed: at,
+        available: data.len(),
+    })?;
+
+    let values = decode(values_scheme, body, runs, level + 1)?;
+    let counts = integers(counts_scheme, rest, runs, level + 1)?;
+
+    let mut out = Vec::with_capacity(rows);
+    for (value, count) in values.into_iter().zip(counts) {
+        let count = usize::try_from(count).map_err(|_| Error::Malformed {
+            what: "a run length encoded column",
+            why: "a run is a negative number of rows long",
+        })?;
+        let end = out
+            .len()
+            .checked_add(count)
+            .filter(|end| *end <= rows)
+            .ok_or(Error::Malformed {
+                what: "a run length encoded column",
+                why: "its runs cover more rows than the chunk holds",
+            })?;
+        out.resize(end, value);
+    }
+    if out.len() != rows {
+        return Err(Error::Malformed {
+            what: "a run length encoded column",
+            why: "its runs do not cover every row of the chunk",
+        });
+    }
+    Ok(out)
 }
 
 /// Reads a bit packed integer column.
