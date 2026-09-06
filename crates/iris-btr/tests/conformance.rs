@@ -13,11 +13,12 @@
 //!
 //! # Cases that are not decoded yet
 //!
-//! Most of the corpus uses schemes this crate has not implemented. Skipping those quietly would let
-//! the suite pass while covering almost nothing, so a case is skipped only if the crate says so
-//! itself by returning `UnsupportedScheme`, and the count of skipped cases is printed and checked.
-//! When a scheme lands, its cases stop being skipped without anyone editing a list, and the check on
-//! the count is what makes that a change somebody has to look at.
+//! There are none left: every case in the corpus decodes and every one of them matches. The
+//! machinery for the ones that did not is still here, because the corpus is meant to grow and the
+//! next case added to it may well use something that is not written. A case is skipped only if the
+//! crate says so itself by returning `UnsupportedScheme`, the skipped ones are printed, and the
+//! floor on how many decoded is checked, so a scheme landing or a case arriving is a change
+//! somebody has to look at rather than a number that quietly moves.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -226,9 +227,10 @@ fn every_case_this_crate_decodes_matches_the_reference_byte_for_byte() {
 
     // The floor is what stops this passing on a crate that decodes nothing. It goes up as schemes
     // land, and it is deliberately an inequality rather than an equality so that implementing a
-    // scheme does not fail the suite that was asking for it.
+    // scheme does not fail the suite that was asking for it. It is now the whole corpus, which is
+    // what M5 asked for, so a case that stops decoding fails here rather than being absorbed.
     assert!(
-        decoded >= 20,
+        decoded >= 22,
         "only {decoded} cases decoded, which is fewer than the schemes already implemented cover"
     );
 }

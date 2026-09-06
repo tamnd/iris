@@ -20,6 +20,7 @@
 use crate::column::{Column, Strings};
 use crate::error::{Error, Result};
 use crate::fastpfor;
+use crate::fsst;
 use crate::part::{Chunk, ColumnType, read_u32};
 use crate::roaring;
 
@@ -196,6 +197,7 @@ fn text(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Strings> {
         UNCOMPRESSED => uncompressed_text(data, rows),
         ONE_VALUE => one_text(data, rows),
         DICT => text_dictionary(data, rows, level),
+        FSST => fsst_text(data, rows, level),
         _ => Err(missing(ColumnType::String, code)),
     }
 }
@@ -742,11 +744,15 @@ fn text_dictionary(data: &[u8], rows: usize, level: u32) -> Result<Strings> {
     let offset = usize::try_from(offset).unwrap_or(usize::MAX);
     let codes_scheme = byte(data, 25, "a string dictionary")?;
 
-    // The dictionary's own strings can be `FSST` compressed, which is a different thing from the
-    // scheme of that name but wants the same decoder. So this waits on `FSST` rather than on
-    // anything to do with dictionaries, and says so, because that is what a reader needs to know.
+    // A dictionary can hold its own entries `FSST` compressed, and when it does the header's other
+    // two offsets come into play and the entries are not laid out as an ordinary run of strings.
+    // That is a second layout rather than a second scheme, no case in the corpus produces it, and a
+    // decoder written against a layout nothing grades is a guess. So it is refused and named.
     if compressed {
-        return Err(missing(ColumnType::String, FSST));
+        return Err(Error::UnsupportedLayout {
+            what: "a string dictionary",
+            why: "it holds its own entries FSST compressed",
+        });
     }
 
     // The dictionary runs from the front of the header's bytes to wherever the codes start, so the
@@ -790,6 +796,96 @@ fn text_dictionary(data: &[u8], rows: usize, level: u32) -> Result<Strings> {
         why: "its rows come to more bytes than an offset can count",
     })?);
     Ok(Strings::new(offsets, bytes))
+}
+
+/// Where an `FSST` string column's own bytes start inside the chunk data.
+///
+/// `FsstStructure` is four words and then a byte, and `data` is declared straight after that byte.
+const FSST_COLUMN: usize = 17;
+
+/// Reads an `FSST` compressed string column.
+///
+/// Three runs of bytes after the header: the symbol table, the codes, and an offset a row plus one
+/// on the end. The offsets are an integer column in their own right, under whatever scheme the
+/// header names, and they are the offsets of the column the reference started with rather than of
+/// the bytes that come out here, so they count from the start of an offset array that is not
+/// written down anywhere. Rebasing them is what turns them into offsets into the decompressed
+/// bytes, and it is also the check that they describe the run they claim to.
+///
+/// The header's first word is how many bytes the reference expected to get back. It is not read.
+/// The offsets say where every row ends and the last of them says where the bytes end, so the count
+/// is either already implied by them or disagrees with them, and there is nothing this could do
+/// about the second case that refusing an offset past the end does not already do.
+fn fsst_text(data: &[u8], rows: usize, level: u32) -> Result<Strings> {
+    let size = read_u32(data, 4, "an FSST string column")?;
+    let size = usize::try_from(size).unwrap_or(usize::MAX);
+    let strings = read_u32(data, 8, "an FSST string column")?;
+    let strings = usize::try_from(strings).unwrap_or(usize::MAX);
+    let offsets = read_u32(data, 12, "an FSST string column")?;
+    let offsets = usize::try_from(offsets).unwrap_or(usize::MAX);
+    let offsets_scheme = byte(data, 16, "an FSST string column")?;
+
+    let body = data.get(FSST_COLUMN..).ok_or(Error::Overrun {
+        what: "an FSST string column",
+        claimed: FSST_COLUMN,
+        available: data.len(),
+    })?;
+
+    // The reference leaves the library's own maximum header room whatever the table really needs,
+    // and then records where the strings start, so the strings are what the table is bounded by.
+    let serialised = body
+        .get(..strings.min(fsst::MAX_HEADER))
+        .ok_or(Error::Overrun {
+            what: "an FSST symbol table",
+            claimed: strings.min(fsst::MAX_HEADER),
+            available: body.len(),
+        })?;
+    let table = fsst::read(serialised)?;
+
+    let codes = body
+        .get(strings..)
+        .and_then(|rest| rest.get(..size))
+        .ok_or(Error::Overrun {
+            what: "a run of FSST codes",
+            claimed: size,
+            available: body.len().saturating_sub(strings.min(body.len())),
+        })?;
+    // Nothing is reserved from the header's count. A symbol is at most eight bytes and a code is
+    // one, so the codes that are really there bound what comes out of them, and growing into that
+    // is a length this has checked rather than one the part claimed.
+    let mut bytes = Vec::new();
+    fsst::decompress(&table, codes, &mut bytes)?;
+
+    let rest = body.get(offsets..).ok_or(Error::Overrun {
+        what: "an FSST string column",
+        claimed: offsets,
+        available: body.len(),
+    })?;
+    let slots = integers(offsets_scheme, rest, rows + 1, level + 1)?;
+
+    let header = rows
+        .checked_add(1)
+        .and_then(|slots| slots.checked_mul(4))
+        .ok_or(Error::Overrun {
+            what: "a string offset array",
+            claimed: usize::MAX,
+            available: bytes.len(),
+        })?;
+    let mut rebased = Vec::with_capacity(rows + 1);
+    for slot in slots {
+        let slot = usize::try_from(slot).unwrap_or(usize::MAX);
+        let at = slot
+            .checked_sub(header)
+            .filter(|at| *at <= bytes.len())
+            .ok_or(Error::Overrun {
+                what: "a string offset",
+                claimed: slot,
+                available: bytes.len(),
+            })?;
+        rebased.push(u32::try_from(at).unwrap_or(u32::MAX));
+    }
+
+    Ok(Strings::new(rebased, bytes))
 }
 
 /// Reads a string column where every row holds the same string.

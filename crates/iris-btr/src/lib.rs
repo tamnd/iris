@@ -25,21 +25,28 @@
 //! Roaring bitmap of the rows that are the exception. On the value side, `UNCOMPRESSED` and
 //! `ONE_VALUE` for all three column types, `BP` and `PFOR` for integer columns, which are bit
 //! packing and bit packing with the values that did not fit kept to one side, `DICT` for all three,
-//! `RLE` for integer and double columns, and `FREQUENCY` and `PSEUDODECIMAL` for double columns.
+//! `RLE` for integer and double columns, `FREQUENCY` and `PSEUDODECIMAL` for double columns, and
+//! `FSST` for string columns. That is every scheme the reference picks by default, and every case
+//! in the conformance corpus decodes byte identical.
 //!
 //! The order that landed in was the framing and the trivial schemes first, so that getting from a
 //! part on disk to values in hand did not depend on any scheme being right, and then bit packing,
 //! because most of the rest cascade through it: a dictionary stores its codes bit packed, a run
 //! length encoding stores its values bit packed, and so on. Neither the packing nor the bitmap is
 //! the reference's own format. The first is Daniel Lemire's `FastPFOR` and the second is
-//! `CRoaring`, and the reference calls out to both and stores what they produced verbatim.
+//! `CRoaring`, and the reference calls out to both and stores what they produced verbatim. `FSST`
+//! is a third, from github.com/cwida/fsst, and came last because nothing cascades through it.
 //!
 //! Because schemes nest, decoding is written as a function per column type that takes a scheme code
 //! and a byte slice, rather than as something hanging off a chunk. A nested scheme has no chunk
 //! header around it, only a code recorded by whatever wrapped it.
 //!
-//! Everything else returns [`Error::UnsupportedScheme`], which the conformance suite counts rather
-//! than ignores, so the number of cases still waiting is a number the test prints.
+//! What is left is the schemes the reference still defines but no longer picks, and one corner of
+//! `DICT` where the dictionary holds its own entries `FSST` compressed, which is a second layout
+//! under the same code rather than a second scheme. The first returns
+//! [`Error::UnsupportedScheme`], which the conformance suite counts rather than ignores, and the
+//! second returns [`Error::UnsupportedLayout`], because saying `FSST` is not implemented would not
+//! be true.
 //!
 //! # Parsing is the untrusted path
 //!
@@ -54,6 +61,7 @@
 mod column;
 mod error;
 mod fastpfor;
+mod fsst;
 mod nullmap;
 mod part;
 mod roaring;
@@ -821,20 +829,94 @@ mod tests {
     }
 
     #[test]
-    fn a_dictionary_whose_own_strings_are_compressed_waits_on_fsst() {
-        // The flag says the entries went through FSST, which is a different thing from the scheme of
-        // that name and wants the same decoder. The error has to name FSST rather than the
-        // dictionary, or the conformance suite would report a case waiting on something that is
-        // already written.
+    fn a_dictionary_whose_own_strings_are_compressed_is_a_layout_and_not_a_scheme() {
+        // The flag says the entries went through FSST, and the rest of the header changes shape when
+        // it does. FSST itself is written, so calling this an unimplemented scheme would be false
+        // and would have the conformance suite report a case waiting on something already there.
         let data = text_dictionary(true, 0, &[b"aa"], &ints(&[0]));
         let bytes = part(2, 0, 2, 1, &data, &[]);
         let part = Part::parse(&bytes).expect("a part");
         let error = part.chunk(0).expect("a chunk").decode().unwrap_err();
         assert!(
-            matches!(error, Error::UnsupportedScheme { code: 3, .. }),
+            matches!(
+                error,
+                Error::UnsupportedLayout {
+                    what: "a string dictionary",
+                    ..
+                }
+            ),
             "{error}"
         );
-        assert!(format!("{error}").contains("FSST"), "{error}");
+    }
+
+    /// A serialised FSST symbol table holding one symbol of two bytes and one of one.
+    ///
+    /// The writer emits lengths two through eight and then length one, so the counts and the bytes
+    /// both go in that order and a reader that walked one through eight would come back with `c`
+    /// as a two byte symbol.
+    fn symbol_table() -> Vec<u8> {
+        let mut bytes = vec![0; 4];
+        bytes.extend_from_slice(&20_190_218u32.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(b"ab");
+        bytes.push(b'c');
+        bytes
+    }
+
+    /// The bytes of an FSST string chunk, with the offsets held uncompressed.
+    fn fsst_column(codes: &[u8], offsets: &[i32]) -> Vec<u8> {
+        let table = symbol_table();
+        let strings = u32::try_from(table.len()).expect("a small table");
+        let size = u32::try_from(codes.len()).expect("a small run");
+
+        let mut bytes = 0u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&size.to_le_bytes());
+        bytes.extend_from_slice(&strings.to_le_bytes());
+        bytes.extend_from_slice(&(strings + size).to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&table);
+        bytes.extend_from_slice(codes);
+        bytes.extend_from_slice(&ints(offsets));
+        bytes
+    }
+
+    #[test]
+    fn an_fsst_column_puts_each_rows_symbols_back_together() {
+        // Three rows out of four codes, so this covers a row of one symbol, a row of another, and a
+        // row that is two of them run together with nothing marking the join.
+        let data = fsst_column(&[0, 1, 0, 1], &[16, 18, 19, 22]);
+        let bytes = part(3, 0, 2, 3, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        let column = part.chunk(0).expect("a chunk").decode().expect("values");
+        let Column::Text(text) = column else {
+            panic!("a string column");
+        };
+        assert_eq!(text.get(0), Some(&b"ab"[..]));
+        assert_eq!(text.get(1), Some(&b"c"[..]));
+        assert_eq!(text.get(2), Some(&b"abc"[..]));
+    }
+
+    #[test]
+    fn an_fsst_offset_past_the_end_of_the_decompressed_bytes_is_refused() {
+        // The offsets come out of a column of their own, so they are not bounded by anything the
+        // codes said. The last one here claims a row ending past what the codes decompressed to.
+        let data = fsst_column(&[0, 1, 0, 1], &[16, 18, 19, 40]);
+        let bytes = part(3, 0, 2, 3, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        let error = part.chunk(0).expect("a chunk").decode().unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::Overrun {
+                    what: "a string offset",
+                    ..
+                }
+            ),
+            "{error}"
+        );
     }
 
     #[test]
