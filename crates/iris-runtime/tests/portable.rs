@@ -34,12 +34,21 @@
 //!
 //! # The third gate
 //!
-//! The last test here is the measurement half of #28. Reading ahead of a scan is only worth having
+//! The other test here is the measurement half of #28. Reading ahead of a scan is only worth having
 //! if it makes a scan cheaper, and whether it does depends on the access pattern rather than on the
 //! idea, so it is measured against the pattern this fixture actually produces rather than against a
 //! run of adjacent requests written to make it look good. The same scan is run twice over the same
 //! object, once with the source as it is and once with the same source read ahead of, and the two
 //! are compared on request count and on the answer they came back with.
+//!
+//! # The fourth gate
+//!
+//! The last test is the measurement half of #30. Reading three of forty columns should transfer
+//! roughly three fortieths of the object, and a pushdown that does not do that is a filter with a
+//! good name. `tests/projection.rs` makes the same claim against a source that counts what it was
+//! asked for, and this one makes it against the server's own byte counter, which is the observer
+//! with no reason to agree with us.
+//!
 
 // Out of the build under loom, where the object storage dev-dependencies are out of the graph
 // because tokio compiled with that flag has no `tokio::net` for hyper to reach for. This file is
@@ -75,6 +84,32 @@ const BATCH_ROWS: u64 = 4_096;
 
 /// Where this gate keeps its fixture, which the CI job removes after a run that failed.
 const SCRATCH: &str = "gate-object";
+
+/// Columns in the fixture the projection gate uses.
+///
+/// Wide enough that reading a few of them is a small fraction rather than a rounding error, and
+/// forty exactly because that is the number #30 is written against.
+const WIDE_COLUMNS: u64 = 40;
+
+/// Rows in the fixture the projection gate uses.
+///
+/// Fewer than the other tests here because this fixture is forty columns wide rather than three, and
+/// the whole of it is read once so that there is something to take a fraction of.
+const WIDE_ROWS: u64 = 20_000;
+
+/// The columns the projection gate asks for.
+///
+/// Spread across the fixture rather than adjacent, so a source that quietly rounds a run of ranges
+/// up to something convenient cannot pass by reading one contiguous stretch.
+const PROJECTED: [u32; 3] = [7, 19, 31];
+
+/// How far the measured share may sit from the share that was asked for.
+///
+/// A hundredth of the object. The slack is response headers, which the endpoint counts and a range
+/// request does not carry: it is a few hundred bytes on every GET, and it lands on both halves of
+/// the ratio. A pushdown that does not reach storage reads the whole object and misses this by an
+/// order of magnitude, so the tolerance is nowhere near the thing being tested.
+const TOLERANCE: f64 = 0.01;
 
 /// How far the readahead gate reads ahead.
 ///
@@ -547,6 +582,127 @@ fn what_a_scan_says_it_moved_is_what_the_endpoint_recorded() {
         overhead <= gets * 4_096,
         "{overhead} bytes of the {sent} the endpoint sent are not accounted for by the {} the \
          scan counted, across {gets} requests",
+        scan.bytes
+    );
+
+    tokio
+        .block_on(store.delete(&key))
+        .expect("the fixture is removed from the store");
+}
+
+#[test]
+#[ignore = "needs an S3 compatible endpoint, run by name from the object storage job"]
+fn a_projected_scan_moves_what_the_projection_asked_for_at_the_endpoint() {
+    let endpoint = match Endpoint::from_env() {
+        Ok(endpoint) => endpoint,
+        Err(why) => panic!(
+            "this gate was run without an endpoint to run against: {why}. \
+             The object storage job in ci.yml starts one and exports the five variables."
+        ),
+    };
+    let metrics = std::env::var("IRIS_TEST_METRICS_URL").unwrap_or_else(|_| {
+        panic!(
+            "IRIS_TEST_METRICS_URL is not set, so there is nothing to measure against. \
+             It is the S3 server's Prometheus endpoint, and the server has to have been started \
+             with its metrics readable without a token."
+        )
+    });
+
+    let builder = builder(WIDE_ROWS, WIDE_COLUMNS);
+    let bytes = builder.build().expect("a container this small always fits");
+
+    let runtime = Runtime::new()
+        .expect("the engine builds")
+        .with_max_batch_rows(BATCH_ROWS);
+
+    let tokio = tokio::runtime::Runtime::new().expect("a tokio runtime starts");
+    let store = endpoint.store();
+    let key = ObjectPath::from("projection.iris");
+    tokio
+        .block_on(store.put(&key, bytes.into()))
+        .expect("the fixture uploads");
+
+    let _guard = tokio.enter();
+
+    // A fresh dataset for each scan, so that neither run starts with the other run's block held and
+    // the measurement is of a scan rather than of the order the two were written in.
+    let open = || {
+        let object = tokio
+            .block_on(ObjectSource::open(Arc::clone(&store), key.clone()))
+            .expect("the object opens");
+        runtime
+            .open_windowed(Box::new(object))
+            .expect("the container opens over the network")
+    };
+
+    // Every scrape happens after the dataset is open, so the trailer, the footer and the decoder
+    // module are outside both windows. What is being compared is two scans.
+    let mut whole = open();
+    let before = Recorded::scrape(&metrics);
+    let all = whole.scan().expect("the decoder runs over the network");
+    let after = Recorded::scrape(&metrics);
+    let full = after.sent - before.sent;
+
+    let mut narrow = open();
+    let before = Recorded::scrape(&metrics);
+    let some = narrow
+        .scan_columns(&PROJECTED)
+        .expect("the decoder runs over the network");
+    let after = Recorded::scrape(&metrics);
+    let projected = after.sent - before.sent;
+
+    // First, that the narrow scan is the same scan. A pushdown that reaches storage and comes back
+    // with the wrong numbers is worse than one that reads everything, so the values are checked
+    // against the wide scan's own answer before a single byte count is looked at.
+    for (at, &column) in PROJECTED.iter().enumerate() {
+        let expected = column_values(
+            &all,
+            usize::try_from(column).expect("a column index fits in a usize"),
+        );
+        let got = column_values(&some, at);
+        assert_eq!(
+            got.len() as u64,
+            WIDE_ROWS,
+            "column {column} came back short from the projected scan"
+        );
+        assert_eq!(
+            got, expected,
+            "column {column} came back differently when it was the only thing asked for"
+        );
+    }
+
+    assert!(
+        full > 0 && projected > 0,
+        "the endpoint recorded {full} bytes for a whole scan and {projected} for a projected one, \
+         so there is nothing here to take a fraction of"
+    );
+
+    // And now the gate. Three columns of forty is three fortieths of the object, and a projection
+    // that is applied after the bytes have already crossed the wire moves all forty.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "two byte counts from one small fixture and two small column counts, divided to \
+                  get a ratio that is compared against a tolerance far larger than anything this \
+                  can lose"
+    )]
+    let (share, asked) = (
+        projected as f64 / full as f64,
+        PROJECTED.len() as f64 / WIDE_COLUMNS as f64,
+    );
+    assert!(
+        (share - asked).abs() <= TOLERANCE,
+        "a scan of {} of {WIDE_COLUMNS} columns moved {projected} bytes where the whole object \
+         moved {full}, which is a share of {share:.4} where {asked:.4} was asked for",
+        PROJECTED.len()
+    );
+
+    // The host's own counter and the endpoint's should tell the same story about the narrow scan.
+    // They are two different observers and the first one is the one a caller sees, so a pushdown
+    // that reached storage while the host reported otherwise would still be a bug worth failing on.
+    let scan = narrow.last_scan();
+    assert!(
+        projected >= scan.bytes,
+        "the projected scan says {} bytes came back and the endpoint only sent {projected}",
         scan.bytes
     );
 
