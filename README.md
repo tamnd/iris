@@ -72,6 +72,10 @@ The file that carries a dataset is described in [`docs/FORMAT.md`](docs/FORMAT.m
 
 Parsing a container is the untrusted path, so that document also sets out the rules the parser follows and the tests and fuzz target that hold it to them.
 
+## What ranges are worth
+
+What declaring ranges is actually worth against a well configured Parquet reader over object storage is measured in [`docs/REMOTE_SCAN.md`](docs/REMOTE_SCAN.md), with the hardware, the endpoint and the round trip time next to the numbers. The answer came out against the design notes: the pushdown is exact, but a page indexed Parquet reader declares ranges just as precisely and compresses on top, so transfer volume is not the differentiator. Carrying the decoder is. That document says so in full rather than burying it.
+
 ## Releasing
 
 How a version is cut, published to crates.io and what the self hosted machines are for is in [`docs/RELEASING.md`](docs/RELEASING.md). The version scheme while the major is zero is worth knowing before reading a tag: a minor tracks a completed milestone and a patch is everything in between, so `v0.1.0` is the tree where M0 finished.
