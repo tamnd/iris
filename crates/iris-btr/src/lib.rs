@@ -26,6 +26,16 @@
 //! from a part on disk to values in hand without any of the answer depending on a scheme being
 //! right, so that everything after it is a scheme dropped into a frame that already works.
 //!
+//! On top of that, `BP` for integer columns, which is bit packing, and `DICT` for integer and
+//! double columns. Bit packing came first because most of the rest cascade through it: a dictionary
+//! stores its codes bit packed, a run length encoding stores its values bit packed, and so on. The
+//! packing itself is not the reference's own format but Daniel Lemire's `FastPFOR`, which the
+//! reference calls out to and stores the output of verbatim.
+//!
+//! Because schemes nest, decoding is written as a function per column type that takes a scheme code
+//! and a byte slice, rather than as something hanging off a chunk. A nested scheme has no chunk
+//! header around it, only a code recorded by whatever wrapped it.
+//!
 //! Everything else returns [`Error::UnsupportedScheme`], which the conformance suite counts rather
 //! than ignores, so the number of cases still waiting is a number the test prints.
 //!
@@ -41,6 +51,7 @@
 
 mod column;
 mod error;
+mod fastpfor;
 mod nullmap;
 mod part;
 mod scheme;
@@ -76,6 +87,120 @@ mod tests {
         bytes.extend_from_slice(data);
         bytes.extend_from_slice(map);
         bytes
+    }
+
+    /// The bytes of a numeric dictionary chunk.
+    ///
+    /// A scheme byte for the codes, the offset the codes start at, the dictionary, then the codes.
+    /// The offset is the length of the dictionary, which is the only thing that says how long it
+    /// is, so it is written from `entries` rather than passed in.
+    fn dictionary(codes: u8, entries: &[u8], packed: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![codes];
+        bytes.extend_from_slice(
+            &u32::try_from(entries.len())
+                .expect("a small dictionary")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(entries);
+        bytes.extend_from_slice(packed);
+        bytes
+    }
+
+    #[test]
+    fn a_dictionary_column_looks_its_codes_up_in_its_own_entries() {
+        // Codes held uncompressed, so this is about the dictionary and not about the packing.
+        let entries: Vec<u8> = [10i32, 20, 30]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let codes: Vec<u8> = [2i32, 0, 1, 2]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let bytes = part(2, 0, 0, 4, &dictionary(0, &entries, &codes), &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert_eq!(
+            part.chunk(0).expect("a chunk").decode().expect("values"),
+            Column::Integer(vec![30, 10, 20, 30])
+        );
+    }
+
+    #[test]
+    fn a_dictionary_holds_doubles_in_exactly_the_same_shape() {
+        // The reference writes one structure for both numeric types and changes only the width of
+        // an entry, so the only thing that should differ here is the column type byte.
+        let entries: Vec<u8> = [1.5f64, -0.25]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let codes: Vec<u8> = [1i32, 1, 0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes = part(2, 0, 1, 3, &dictionary(0, &entries, &codes), &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert_eq!(
+            part.chunk(0).expect("a chunk").decode().expect("values"),
+            Column::Double(vec![-0.25, -0.25, 1.5])
+        );
+    }
+
+    #[test]
+    fn a_code_pointing_outside_the_dictionary_is_refused() {
+        // The reference indexes with the code directly, so a part like this reads whatever was next
+        // in its address space and there is no answer to copy.
+        let entries: Vec<u8> = [10i32, 20].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let codes: Vec<u8> = [0i32, 7].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes = part(2, 0, 0, 2, &dictionary(0, &entries, &codes), &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a dictionary",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_dictionary_whose_entries_do_not_divide_into_values_is_refused() {
+        let bytes = part(
+            2,
+            0,
+            0,
+            1,
+            &dictionary(0, &[1, 2, 3], &0i32.to_le_bytes()),
+            &[],
+        );
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a dictionary",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_cascade_that_nests_forever_is_refused_rather_than_taking_the_stack() {
+        // Each layer is a dictionary whose codes are another dictionary. The reference caps a
+        // cascade at three and nothing it writes is deeper, so a part shaped like this did not come
+        // from it, and the only question is whether reading it returns or takes the process with it.
+        let mut data = dictionary(0, &0i32.to_le_bytes(), &0i32.to_le_bytes());
+        for _ in 0..12 {
+            data = dictionary(2, &0i32.to_le_bytes(), &data);
+        }
+
+        let bytes = part(2, 0, 0, 1, &data, &[]);
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a cascade of schemes",
+                ..
+            })
+        ));
     }
 
     #[test]

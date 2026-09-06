@@ -1,17 +1,25 @@
-//! The schemes, and the two of them that are decoded so far.
+//! The schemes, and the ones that are decoded so far.
 //!
 //! A scheme code is a byte in the chunk header and it means different things for different column
 //! types, so every table here is per type. The names are the reference's own, including the ones it
 //! marks as legacy and no longer chooses, because a chunk written by an older copy of it can still
 //! carry one and a reader that met one should be able to say what it is rather than say a number.
 //!
-//! Two are implemented, and they are the two that carry no compression at all. That is deliberate
-//! for a first pass: they exercise the whole path from a part on disk to values in hand, for all
-//! three column types, without any of the answer depending on a scheme being right. Everything
-//! after this is a scheme dropped into a frame that already works.
+//! The first two were the two that carry no compression at all, which exercised the whole path from
+//! a part on disk to values in hand, for all three column types, without any of the answer depending
+//! on a scheme being right. Everything since is a scheme dropped into a frame that already works.
+//!
+//! # Schemes nest
+//!
+//! A scheme can hold its output under another scheme. A dictionary keeps its entries and then keeps
+//! its codes as an integer column in its own right, and that column carries a scheme byte of its own
+//! rather than a chunk header. So decoding is a function per column type taking a code and a slice,
+//! calling back into itself, rather than something hanging off a chunk, and `level` is how far down
+//! the calls have gone.
 
 use crate::column::{Column, Strings};
 use crate::error::{Error, Result};
+use crate::fastpfor;
 use crate::part::{Chunk, ColumnType, read_u32};
 
 /// The reference's name for a scheme code, or `"unknown"`.
@@ -72,6 +80,22 @@ const UNCOMPRESSED: u8 = 0;
 /// The code for `ONE_VALUE`, likewise.
 const ONE_VALUE: u8 = 1;
 
+/// The code for `DICT`, which is the same for all three column types and means a different layout
+/// for strings than it does for the two numeric ones.
+const DICT: u8 = 2;
+
+/// The code for `BP`, which is an integer scheme and has no counterpart for the other two types.
+const BP: u8 = 5;
+
+/// How deep a cascade may go before this gives up on it.
+///
+/// The reference's own configuration caps a cascade at three, and nothing it writes goes further.
+/// This is looser than that on purpose, because refusing a legitimate part is worse than reading a
+/// deep one, but it is a cap rather than no cap: schemes nest by calling back into this, and a part
+/// that nested a dictionary inside itself forever would otherwise take the stack with it, which is
+/// the one failure a caller cannot catch.
+const CASCADE: u32 = 8;
+
 impl Chunk<'_> {
     /// Decodes the chunk.
     ///
@@ -84,7 +108,6 @@ impl Chunk<'_> {
     /// If the scheme is not implemented yet, if it is not one the reference defines, or if the
     /// chunk is too short for what the scheme says is in it.
     pub fn decode(&self) -> Result<Column> {
-        let column = self.column();
         let code = self.scheme();
         let rows = usize::try_from(self.rows()).map_err(|_| Error::Overrun {
             what: "the row count",
@@ -92,40 +115,70 @@ impl Chunk<'_> {
             available: self.data().len(),
         })?;
 
-        match (column, code) {
-            (ColumnType::Integer, UNCOMPRESSED) => Ok(Column::Integer(fixed(
-                self.data(),
-                rows,
-                i32::from_le_bytes,
-            )?)),
-            (ColumnType::Double, UNCOMPRESSED) => Ok(Column::Double(fixed(
-                self.data(),
-                rows,
-                f64::from_le_bytes,
-            )?)),
-            (ColumnType::String, UNCOMPRESSED) => {
-                Ok(Column::Text(uncompressed_text(self.data(), rows)?))
-            }
-
-            (ColumnType::Integer, ONE_VALUE) => Ok(Column::Integer(vec![
-                one::<4, i32>(
-                    self.data(),
-                    i32::from_le_bytes
-                )?;
-                rows
-            ])),
-            (ColumnType::Double, ONE_VALUE) => Ok(Column::Double(vec![
-                one::<8, f64>(
-                    self.data(),
-                    f64::from_le_bytes
-                )?;
-                rows
-            ])),
-            (ColumnType::String, ONE_VALUE) => Ok(Column::Text(one_text(self.data(), rows)?)),
-
-            _ if known(column, code) => Err(Error::UnsupportedScheme { column, code }),
-            _ => Err(Error::UnknownScheme { column, code }),
+        match self.column() {
+            ColumnType::Integer => Ok(Column::Integer(integers(code, self.data(), rows, 0)?)),
+            ColumnType::Double => Ok(Column::Double(doubles(code, self.data(), rows, 0)?)),
+            ColumnType::String => Ok(Column::Text(text(code, self.data(), rows, 0)?)),
         }
+    }
+}
+
+/// Decodes an integer column held under `code`.
+///
+/// Split out from [`Chunk::decode`] rather than written inside it because the reference nests
+/// schemes. A dictionary stores its codes as an integer column in its own right, with its own
+/// scheme byte, and so does a run length encoding, and a nested one has no chunk header around it,
+/// only a scheme code recorded by whatever wraps it. So the recursion is on this and `level` counts
+/// how far down it has gone.
+fn integers(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Vec<i32>> {
+    deep_enough(level)?;
+    match code {
+        UNCOMPRESSED => fixed(data, rows, i32::from_le_bytes),
+        ONE_VALUE => Ok(vec![one::<4, i32>(data, i32::from_le_bytes)?; rows]),
+        BP => bit_packed(data, rows),
+        DICT => dictionary::<4, i32>(data, rows, level, i32::from_le_bytes),
+        _ => Err(missing(ColumnType::Integer, code)),
+    }
+}
+
+/// Decodes a double column held under `code`.
+fn doubles(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Vec<f64>> {
+    deep_enough(level)?;
+    match code {
+        UNCOMPRESSED => fixed(data, rows, f64::from_le_bytes),
+        ONE_VALUE => Ok(vec![one::<8, f64>(data, f64::from_le_bytes)?; rows]),
+        DICT => dictionary::<8, f64>(data, rows, level, f64::from_le_bytes),
+        _ => Err(missing(ColumnType::Double, code)),
+    }
+}
+
+/// Decodes a string column held under `code`.
+fn text(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Strings> {
+    deep_enough(level)?;
+    match code {
+        UNCOMPRESSED => uncompressed_text(data, rows),
+        ONE_VALUE => one_text(data, rows),
+        _ => Err(missing(ColumnType::String, code)),
+    }
+}
+
+/// Whether a cascade has gone as far as this reads.
+fn deep_enough(level: u32) -> Result<()> {
+    if level > CASCADE {
+        return Err(Error::Malformed {
+            what: "a cascade of schemes",
+            why: "it nests deeper than anything the reference writes",
+        });
+    }
+    Ok(())
+}
+
+/// Which of the two errors a scheme code that did not decode deserves.
+fn missing(column: ColumnType, code: u8) -> Error {
+    if known(column, code) {
+        Error::UnsupportedScheme { column, code }
+    } else {
+        Error::UnknownScheme { column, code }
     }
 }
 
@@ -153,6 +206,123 @@ fn fixed<const N: usize, T>(data: &[u8], rows: usize, from: fn([u8; N]) -> T) ->
         .iter()
         .copied()
         .map(from)
+        .collect())
+}
+
+/// Where a dictionary's own bytes start inside the chunk data.
+///
+/// `DynamicDictionaryStructure` is a scheme byte for the codes, then a four byte offset, then
+/// everything else, and the reference declares it packed. Packed is the whole point: without it the
+/// compiler would put three bytes of padding after the scheme byte and this would be eight.
+const DICTIONARY: usize = 5;
+
+/// Reads a dictionary encoded numeric column.
+///
+/// The chunk holds the distinct values, then the codes as an integer column in their own right with
+/// their own scheme byte. The offset in the header is where the codes start, measured from the end
+/// of that header, which means it doubles as the size of the dictionary and is the only thing that
+/// says how many entries are in it.
+///
+/// The reference uses this same structure for integer and for double columns, changing only the
+/// width of a dictionary entry, so this is written once and given the width. The codes are integers
+/// either way.
+///
+/// A code that points outside the dictionary is refused. The reference indexes with it directly, so
+/// a part that got this wrong would read whatever was next in its address space, and there is no
+/// answer to copy here.
+fn dictionary<const N: usize, T: Copy>(
+    data: &[u8],
+    rows: usize,
+    level: u32,
+    from: fn([u8; N]) -> T,
+) -> Result<Vec<T>> {
+    let scheme = *data.first().ok_or(Error::Truncated {
+        what: "a dictionary",
+        from: 0,
+        to: 1,
+        len: data.len(),
+    })?;
+    let offset = usize::try_from(read_u32(data, 1, "a dictionary")?).unwrap_or(usize::MAX);
+
+    let entries = data
+        .get(DICTIONARY..)
+        .and_then(|rest| rest.get(..offset))
+        .ok_or(Error::Overrun {
+            what: "a dictionary",
+            claimed: offset,
+            available: data.len().saturating_sub(DICTIONARY),
+        })?;
+    if entries.len() % N != 0 {
+        return Err(Error::Malformed {
+            what: "a dictionary",
+            why: "its entries do not divide into whole values",
+        });
+    }
+    let dictionary: Vec<T> = entries
+        .as_chunks::<N>()
+        .0
+        .iter()
+        .copied()
+        .map(from)
+        .collect();
+
+    let at = DICTIONARY.saturating_add(offset);
+    let rest = data.get(at..).ok_or(Error::Overrun {
+        what: "a dictionary",
+        claimed: at,
+        available: data.len(),
+    })?;
+
+    integers(scheme, rest, rows, level + 1)?
+        .into_iter()
+        .map(|code| {
+            usize::try_from(code)
+                .ok()
+                .and_then(|code| dictionary.get(code))
+                .copied()
+                .ok_or(Error::Malformed {
+                    what: "a dictionary",
+                    why: "a code points outside the dictionary",
+                })
+        })
+        .collect()
+}
+
+/// Reads a bit packed integer column.
+///
+/// The chunk holds the reference's `XPBPStructure`: a count of the thirty two bit words the codec
+/// wrote, then a single padding byte, then the words themselves. The padding is there because the
+/// reference aligns the pointer it hands the codec at compression time, so how many bytes it had to
+/// skip depends on where that buffer happened to sit in memory. It is recorded in the chunk rather
+/// than derived from anything, and a reader has no way to work it out for itself, so this reads it
+/// and skips the same number of bytes.
+///
+/// The values come back as unsigned because that is what the codec deals in. The reference hands it
+/// the signed values reinterpreted, so turning them back is a reinterpretation and not a conversion,
+/// and a negative value is one that needed all thirty two bits.
+fn bit_packed(data: &[u8], rows: usize) -> Result<Vec<i32>> {
+    let words = read_u32(data, 0, "a bit packed column")?;
+    let words = usize::try_from(words).unwrap_or(usize::MAX);
+    let padding = usize::from(*data.get(4).ok_or(Error::Truncated {
+        what: "a bit packed column",
+        from: 4,
+        to: 5,
+        len: data.len(),
+    })?);
+
+    // Five, not the eight the C++ struct measures, because `data` is declared straight after the
+    // padding byte and the trailing bytes that round the struct up to a multiple of four are not
+    // part of it.
+    let at = 5 + padding;
+    let body = data.get(at..).ok_or(Error::Overrun {
+        what: "a bit packed column",
+        claimed: at,
+        available: data.len(),
+    })?;
+
+    Ok(fastpfor::binary_packed(body, words, rows)?
+        .into_iter()
+        .map(u32::cast_signed)
         .collect())
 }
 
