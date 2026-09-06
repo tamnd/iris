@@ -18,6 +18,7 @@ categories = ["database-implementations", "encoding", "wasm"]
 
 [workspace.dependencies]
 iris-abi = { path = "crates/iris-abi", version = "0.5.0" }
+iris-btr = { path = "crates/iris-btr", version = "0.5.0" }
 iris-decoder = { path = "crates/iris-decoder", version = "0.5.0" }
 iris-format = { path = "crates/iris-format", version = "0.5.0" }
 iris-guard = { path = "crates/iris-guard", version = "0.5.0" }

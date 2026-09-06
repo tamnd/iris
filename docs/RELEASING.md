@@ -51,7 +51,7 @@ A crate that has been throttled for longer than `MAX_WAIT_PER_CRATE` stops the r
 
 Dependency order, written down in the script rather than derived, because the list is read by anybody trying to understand the release and a derived one is not:
 
-`iris-abi`, `iris-format`, `iris-guard`, `iris-source`, `iris-trust`, `iris-native`, `iris-decoder`, `iris-vm`, `iris-runtime`, `irisdb`.
+`iris-abi`, `iris-format`, `iris-btr`, `iris-guard`, `iris-source`, `iris-trust`, `iris-native`, `iris-decoder`, `iris-vm`, `iris-runtime`, `irisdb`.
 
 The script checks that list against the manifests before it uploads anything, which it does because the list was wrong once in exactly the way a hand written list goes wrong. `iris-native` sat above `iris-trust` and depends on it, and nothing noticed until crates.io refused the upload with three names already published. A half published release is the expensive failure here, since a version cannot be taken back, only yanked, so reading ten manifests first is a second of work against a mistake that costs an afternoon.
 

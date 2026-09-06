@@ -31,6 +31,7 @@ Every performance claim here is settled in [`tamnd/iris-bench`](https://github.c
 | `iris-abi` | The guest and host ABI. Record layouts, capability negotiation, version rules. No I/O. |
 | `iris-decoder` | Guest side SDK. What you write a decoder against. |
 | `iris-format` | The bundle and metadata format. Parsing, writing, content digests. |
+| `iris-btr` | A reader for the BtrBlocks column format, graded byte for byte against the reference. |
 | `iris-vm` | The WebAssembly execution layer over Wasmtime. Instantiation, metering, the window. |
 | `iris-source` | `RangeSource` and its implementations: file, mapped file, object store. |
 | `iris-guard` | Structural validation of Arrow arrays crossing the sandbox boundary. |

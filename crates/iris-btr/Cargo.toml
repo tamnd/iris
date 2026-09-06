@@ -1,0 +1,30 @@
+[package]
+name = "iris-btr"
+description = "A reader for the BtrBlocks column format, checked against the reference implementation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# The conformance suite reads a corpus that lives at the top of the repository rather than inside
+# this crate, so it cannot run from a published .crate and shipping it would only give somebody a
+# test that fails for a reason that is not about their machine. It is a repository test, and the
+# repository is where it stays.
+exclude = ["tests/conformance.rs"]
+
+[dependencies]
+thiserror.workspace = true
+
+# No dependency on iris-abi or iris-decoder. This crate reads a format and returns values, and it
+# has to be buildable and testable on a host to be worth anything, which a crate compiled to wasm
+# for a guest is not. The decoder that wires this to the SDK is a separate crate, the same way
+# iris-format is separate from anything that decodes with it.
+
+[lints]
+workspace = true

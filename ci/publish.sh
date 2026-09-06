@@ -29,6 +29,7 @@ DRY_RUN="${2:-}"
 CRATES=(
   iris-abi
   iris-format
+  iris-btr
   iris-guard
   iris-source
   iris-trust
