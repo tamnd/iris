@@ -58,15 +58,20 @@ fn pattern(offset: u64) -> u8 {
 
 /// The sample file, created on first use and kept for the life of the process.
 ///
-/// The directory is leaked on purpose. A fuzz target has no place to run teardown, and a temporary
-/// directory dropped at the end of the first input would take the file out from under every input
-/// after it.
+/// The directory outlives every input on purpose. A fuzz target has no place to run teardown, and a
+/// temporary directory dropped at the end of the first input would take the file out from under
+/// every input after it.
+///
+/// It is parked in the `OnceLock` rather than handed to `Box::leak`, which does the same thing to
+/// the filesystem and a different thing to LeakSanitizer. A leaked box leaves no live pointer, so
+/// the sanitizer that runs under every fuzz target reports the handle and the path string it owns
+/// as thirty nine leaked bytes and fails the run at the end of an otherwise clean half hour. Held
+/// here it is still never freed and it is still reachable, which is the distinction that check is
+/// actually making.
 fn sample() -> &'static PathBuf {
-    static SAMPLE: OnceLock<PathBuf> = OnceLock::new();
-    SAMPLE.get_or_init(|| {
-        let dir = Box::leak(Box::new(
-            tempfile::tempdir().expect("a temporary directory"),
-        ));
+    static SAMPLE: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
+    let (_, path) = SAMPLE.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("a temporary directory");
         let path = dir.path().join("sample.bin");
         let mut file = File::create(&path).expect("creating the sample");
         let mut block = vec![0u8; 64 * 1024];
@@ -79,8 +84,9 @@ fn sample() -> &'static PathBuf {
             written += block.len() as u64;
         }
         file.sync_all().expect("flushing the sample");
-        path
-    })
+        (dir, path)
+    });
+    path
 }
 
 /// One request: where to read from and how much.
