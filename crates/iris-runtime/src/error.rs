@@ -116,6 +116,20 @@ pub enum Error {
         detail: String,
     },
 
+    /// A scan named a column the dataset does not have.
+    ///
+    /// Caught by the host before the decoder is asked for anything, because a projection is the
+    /// caller's own arithmetic and an index one past the end is the mistake it usually is. Sending
+    /// it on would make it the decoder's problem to report, and a decoder is not obliged to report
+    /// it well.
+    #[error("the projection names column {column} and this dataset has {fields}")]
+    Projection {
+        /// The index that was out of range.
+        column: u32,
+        /// How many columns the dataset really has.
+        fields: usize,
+    },
+
     /// A batch does not describe the arrays its schema says it should.
     ///
     /// Every way to get here is a decoder bug, and the detail says which count was wrong, because

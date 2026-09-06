@@ -158,10 +158,10 @@ jobs:
       # for a reason nobody asked about, and a named one that disappears is a job that fails saying
       # the name is gone.
       #
-      # One thread, because the second gate reconciles what a scan says it moved against what the
-      # server wrote in its own counters, and those counters are the server's rather than the
-      # test's. Another test making requests at the same time lands in the same numbers and the
-      # reconciliation is then about nothing.
+      # One thread, because two of these gates measure against what the server wrote in its own
+      # counters, and those counters are the server's rather than the test's. Another test making
+      # requests at the same time lands in the same numbers and the measurement is then about
+      # nothing.
       - name: One decoder, a file and an object
         run: >-
           cargo test --locked -p iris-runtime --test portable --
@@ -169,6 +169,7 @@ jobs:
           one_decoder_reads_a_file_and_an_object_and_says_the_same_thing
           what_a_scan_says_it_moved_is_what_the_endpoint_recorded
           reading_ahead_of_a_scan_costs_fewer_requests_for_the_same_answer
+          a_projected_scan_moves_what_the_projection_asked_for_at_the_endpoint
 
       - name: Clean up after a run that did not
         if: always()

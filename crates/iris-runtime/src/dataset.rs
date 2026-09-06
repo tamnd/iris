@@ -6,8 +6,8 @@ use std::time::Duration;
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use iris_abi::{
-    ABI_MAJOR, ABI_MINOR, Agreement, Capability, CapabilitySet, Hello, HelloAck, ScanRequest,
-    Writer, negotiate,
+    ABI_MAJOR, ABI_MINOR, Agreement, Capability, CapabilitySet, Hello, HelloAck, Projection,
+    Refusal, RefusalReason, ScanRequest, Writer, negotiate,
 };
 use iris_format::layout::HEADER_SIZE;
 use iris_format::{Container, Digest, Directory, Placement, SchemaEncoding, Section, SectionKind};
@@ -410,9 +410,49 @@ impl Dataset<'_> {
     /// [`Error::Vm`] if the decoder trapped or declined the request, and [`Error::Shape`] if a
     /// batch it produced does not match the schema.
     pub fn scan_rows(&self, start: u64, count: u64) -> Result<Vec<RecordBatch>> {
+        self.scan_rows_columns(start, count, &[])
+    }
+
+    /// Reads every row of the columns named, in the order they are named.
+    ///
+    /// # Errors
+    ///
+    /// See [`Dataset::scan_rows_columns`].
+    pub fn scan_columns(&self, columns: &[u32]) -> Result<Vec<RecordBatch>> {
+        self.scan_rows_columns(0, self.rows, columns)
+    }
+
+    /// Reads a range of rows of the columns named, in the order they are named.
+    ///
+    /// The batches that come back carry the projected schema rather than the container's, so a
+    /// caller reading the third field of a batch gets the third column it asked for and not the
+    /// third column of the dataset.
+    ///
+    /// Nothing is saved on this path. The source is already resident and the whole of it was
+    /// already paid for, so a projection here is the decoder doing less work rather than the host
+    /// moving fewer bytes. [`Windowed::scan_rows_columns`] is where it costs less.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Dataset::scan_rows`], plus [`Error::Projection`] if a column named is not one
+    /// the dataset has, and [`Error::Refused`] if the decoder did not agree to
+    /// [`Capability::PROJECTION`] and so cannot be asked for part of a row.
+    pub fn scan_rows_columns(
+        &self,
+        start: u64,
+        count: u64,
+        columns: &[u32],
+    ) -> Result<Vec<RecordBatch>> {
         let mut decoder = Decoder::instantiate(&self.program)?;
         decoder.load_source(self.source)?;
-        run(&mut decoder, &self.hello(), &self.schema, start, count)
+        run(
+            &mut decoder,
+            &self.hello(),
+            &self.schema,
+            start,
+            count,
+            columns,
+        )
     }
 
     fn hello(&self) -> Hello {
@@ -557,6 +597,42 @@ impl Windowed {
     /// The same as [`Dataset::scan_rows`], plus [`Error::Vm`] carrying [`iris_vm::Error::Source`]
     /// if a range the decoder asked for could not be served.
     pub fn scan_rows(&mut self, start: u64, count: u64) -> Result<Vec<RecordBatch>> {
+        self.scan_rows_columns(start, count, &[])
+    }
+
+    /// Reads every row of the columns named, in the order they are named.
+    ///
+    /// # Errors
+    ///
+    /// See [`Windowed::scan_rows_columns`].
+    pub fn scan_columns(&mut self, columns: &[u32]) -> Result<Vec<RecordBatch>> {
+        self.scan_rows_columns(0, self.rows, columns)
+    }
+
+    /// Reads a range of rows of the columns named, pulling only the bytes those columns need.
+    ///
+    /// This is the path where a projection is worth something. The host does not decide which bytes
+    /// to fetch, the decoder does, by naming ranges, so a projection that reaches storage is one
+    /// the decoder was told about and acted on. [`Windowed::last_scan`] is where that shows up: a
+    /// scan of three columns out of forty over a real network moves about three fortieths of the
+    /// data section, and if it moves all of it then the projection was a filter applied after the
+    /// fact and the pushdown did not happen.
+    ///
+    /// A decoder is free to fetch more than the projection strictly needs, and a well behaved one
+    /// does when the alternative is many small requests. What it must not do is fetch the columns
+    /// nobody asked for.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Windowed::scan_rows`], plus [`Error::Projection`] if a column named is not one
+    /// the dataset has, and [`Error::Refused`] if the decoder did not agree to
+    /// [`Capability::PROJECTION`] and so cannot be asked for part of a row.
+    pub fn scan_rows_columns(
+        &mut self,
+        start: u64,
+        count: u64,
+        columns: &[u32],
+    ) -> Result<Vec<RecordBatch>> {
         let mut decoder = Decoder::instantiate(&self.program)?;
 
         // Nothing is loaded up front, so the guest's resident buffer stays empty and every range
@@ -570,7 +646,14 @@ impl Windowed {
         // should not be handed the cost of getting to the point where a scan was possible.
         let before = source.traffic();
         decoder.attach(source);
-        let outcome = run(&mut decoder, &self.hello(), &self.schema, start, count);
+        let outcome = run(
+            &mut decoder,
+            &self.hello(),
+            &self.schema,
+            start,
+            count,
+            columns,
+        );
         self.source = decoder.detach();
 
         // Recorded whether or not the scan worked. A scan that failed part way through still moved
@@ -605,6 +688,7 @@ fn run(
     schema: &SchemaRef,
     start: u64,
     count: u64,
+    columns: &[u32],
 ) -> Result<Vec<RecordBatch>> {
     // Waited on rather than polled. Waiting is what a host with a thread to spare does, and it is
     // what this one is: it has been handed a scan and has nothing else to do until it answers. A
@@ -622,12 +706,27 @@ fn run(
         optional: handshake.optional,
         decoder_id: &handshake.decoder_id,
     };
-    let _agreement: Agreement =
+    let agreement: Agreement =
         negotiate(hello, &ack).map_err(|refusal| Error::refused(&refusal))?;
 
+    // Checked before anything is asked for rather than after something comes back. A decoder that
+    // never mentioned projection will read every column whatever it is sent, and the batches it
+    // produces would then be assembled against a schema of three fields with forty arrays in hand.
+    // That is a `Shape` error naming a count, which sends whoever reads it looking for a bug in the
+    // decoder rather than at the one line of theirs that asked for something the decoder cannot do.
+    if !columns.is_empty() && !agreement.agreed.contains(Capability::PROJECTION) {
+        return Err(Error::refused(&Refusal::new(
+            RefusalReason::MISSING_CAPABILITY,
+            "this scan names columns and the decoder did not agree to projection, so it would              read every column and the batches would not match what was asked for",
+        )));
+    }
+
+    let projected = project(schema, columns)?;
+    let indices: Vec<u8> = columns.iter().flat_map(|c| c.to_le_bytes()).collect();
     let request = ScanRequest {
         row_start: start,
         row_count: count,
+        projection: Projection::from_bytes(&indices)?,
         ..ScanRequest::everything()
     };
     let raw = decoder.scan(&record(|w| request.encode(w))?).wait()?;
@@ -639,9 +738,34 @@ fn run(
         if batch.rows == 0 && batch.nodes.is_empty() {
             continue;
         }
-        batches.push(record_batch(schema, batch)?);
+        batches.push(record_batch(&projected, batch)?);
     }
     Ok(batches)
+}
+
+/// The schema the batches of a projected scan carry.
+///
+/// An empty projection means every column, here and in the ABI both, so it hands the container's
+/// own schema back untouched. Anything else is the named fields in the order they were named, which
+/// is the order the decoder emits its arrays in, so the two cannot drift apart.
+///
+/// The bounds check is here rather than left to Arrow because the message is the whole value of it.
+/// A caller that asked for column forty of a dataset with forty columns has made an off by one, and
+/// a sentence saying which index and how many there are ends that in one read.
+fn project(schema: &SchemaRef, columns: &[u32]) -> Result<SchemaRef> {
+    if columns.is_empty() {
+        return Ok(SchemaRef::clone(schema));
+    }
+    let fields = schema.fields().len();
+    let mut indices = Vec::with_capacity(columns.len());
+    for &column in columns {
+        let at = usize::try_from(column).unwrap_or(usize::MAX);
+        if at >= fields {
+            return Err(Error::Projection { column, fields });
+        }
+        indices.push(at);
+    }
+    Ok(SchemaRef::new(schema.project(&indices)?))
 }
 
 /// Writes a record into a fresh buffer, growing until it fits.
