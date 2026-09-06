@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -17,16 +17,16 @@ categories = ["database-implementations", "encoding", "wasm"]
 # package at a file outside itself, which cargo packages by accident and warns about.
 
 [workspace.dependencies]
-iris-abi = { path = "crates/iris-abi", version = "0.5.1" }
-iris-btr = { path = "crates/iris-btr", version = "0.5.1" }
-iris-decoder = { path = "crates/iris-decoder", version = "0.5.1" }
-iris-format = { path = "crates/iris-format", version = "0.5.1" }
-iris-guard = { path = "crates/iris-guard", version = "0.5.1" }
-iris-native = { path = "crates/iris-native", version = "0.5.1" }
-iris-runtime = { path = "crates/iris-runtime", version = "0.5.1" }
-iris-source = { path = "crates/iris-source", version = "0.5.1" }
-iris-trust = { path = "crates/iris-trust", version = "0.5.1" }
-iris-vm = { path = "crates/iris-vm", version = "0.5.1" }
+iris-abi = { path = "crates/iris-abi", version = "0.5.2" }
+iris-btr = { path = "crates/iris-btr", version = "0.5.2" }
+iris-decoder = { path = "crates/iris-decoder", version = "0.5.2" }
+iris-format = { path = "crates/iris-format", version = "0.5.2" }
+iris-guard = { path = "crates/iris-guard", version = "0.5.2" }
+iris-native = { path = "crates/iris-native", version = "0.5.2" }
+iris-runtime = { path = "crates/iris-runtime", version = "0.5.2" }
+iris-source = { path = "crates/iris-source", version = "0.5.2" }
+iris-trust = { path = "crates/iris-trust", version = "0.5.2" }
+iris-vm = { path = "crates/iris-vm", version = "0.5.2" }
 
 anyhow = "1.0.104"
 arrow-array = "59.3.0"
