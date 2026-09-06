@@ -91,6 +91,19 @@ pub enum Error {
         code: u8,
     },
 
+    /// A compressed stream that does not describe itself consistently.
+    ///
+    /// Separate from [`Error::Overrun`], which is a length that does not fit in the bytes there.
+    /// This is a stream that fits and still makes no sense, which for a bit packed block means a
+    /// width no packing can have or a count that is not a whole number of blocks.
+    #[error("{what} is malformed: {why}")]
+    Malformed {
+        /// What was being read.
+        what: &'static str,
+        /// What was wrong with it.
+        why: &'static str,
+    },
+
     /// A length inside a chunk that does not fit in what the chunk holds.
     ///
     /// This is the field a malicious part would reach for, so it is checked against the bytes that

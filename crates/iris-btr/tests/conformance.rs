@@ -233,9 +233,8 @@ fn every_case_this_crate_decodes_matches_the_reference_byte_for_byte() {
     // land, and it is deliberately an inequality rather than an equality so that implementing a
     // scheme does not fail the suite that was asking for it.
     assert!(
-        decoded >= 9,
-        "only {decoded} cases decoded, which is fewer than the framing and the trivial schemes \
-         already cover"
+        decoded >= 12,
+        "only {decoded} cases decoded, which is fewer than the schemes already implemented cover"
     );
 }
 
