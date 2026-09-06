@@ -41,6 +41,11 @@
 //! object, once with the source as it is and once with the same source read ahead of, and the two
 //! are compared on request count and on the answer they came back with.
 
+// Out of the build under loom, where the object storage dev-dependencies are out of the graph
+// because tokio compiled with that flag has no `tokio::net` for hyper to reach for. This file is
+// the only thing in the crate that wants them.
+#![cfg(not(loom))]
+
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::sync::Arc;

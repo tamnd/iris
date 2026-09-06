@@ -42,11 +42,17 @@ thiserror.workspace = true
 # by running cargo, not by linking it, and a dev-dependency would build a second copy of it for the
 # host that nothing ever calls.
 
-[dev-dependencies]
 # The object storage half of the M4 portability gate. These are dev-dependencies and nothing else, so
 # a host that embeds this crate to read local files still does not link an HTTP stack or an async
 # runtime, which is the promise iris-source makes about its own feature and would be worth very
 # little if the runtime above it broke it.
+#
+# They are also out of the graph under `cfg(loom)`. Loom is turned on through RUSTFLAGS, so it
+# reaches every crate that gets built and not only this one, and tokio under that flag compiles
+# without `tokio::net`, which hyper below object_store needs. The loom models are about the memory
+# pool and have nothing to do with object storage, so the fix is to not build the HTTP stack for
+# them rather than to argue with tokio about a flag that was meant for it.
+[target.'cfg(not(loom))'.dev-dependencies]
 iris-source = { workspace = true, features = ["object-store"] }
 object_store = { workspace = true, features = ["aws"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

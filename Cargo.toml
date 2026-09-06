@@ -85,6 +85,9 @@ missing_debug_implementations = "warn"
 missing_docs = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"
+# `loom` is set by the nightly job through RUSTFLAGS and never by a cargo feature, which is what the
+# M6 gate asks for. Naming it here is what stops the compiler reading it as a misspelling.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 unsafe_op_in_unsafe_fn = "deny"
 unused_qualifications = "warn"
 
