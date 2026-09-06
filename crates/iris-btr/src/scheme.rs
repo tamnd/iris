@@ -21,6 +21,7 @@ use crate::column::{Column, Strings};
 use crate::error::{Error, Result};
 use crate::fastpfor;
 use crate::part::{Chunk, ColumnType, read_u32};
+use crate::roaring;
 
 /// The reference's name for a scheme code, or `"unknown"`.
 ///
@@ -87,6 +88,13 @@ const DICT: u8 = 2;
 /// The code for `RLE`, which is an integer and a double scheme and is something else entirely for
 /// strings.
 const RLE: u8 = 3;
+
+/// The code for `FREQUENCY` on a double column.
+///
+/// Integer columns have a scheme of the same name at a different code, which the reference marks as
+/// legacy and no longer chooses. That one is not read here, because nothing in the corpus is written
+/// with it and a scheme nothing grades is a claim rather than an implementation.
+const FREQUENCY: u8 = 4;
 
 /// The code for `BP`, which is an integer scheme and has no counterpart for the other two types.
 const BP: u8 = 5;
@@ -168,6 +176,7 @@ fn doubles(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Vec<f64>> {
         ONE_VALUE => Ok(vec![one::<8, f64>(data, f64::from_le_bytes)?; rows]),
         DICT => dictionary::<8, f64>(data, rows, level, f64::from_le_bytes),
         RLE => run_length(data, rows, level, doubles),
+        FREQUENCY => frequency(data, rows, level),
         PSEUDODECIMAL => pseudodecimal(data, rows, level),
         _ => Err(missing(ColumnType::Double, code)),
     }
@@ -402,6 +411,64 @@ fn byte(data: &[u8], at: usize, what: &'static str) -> Result<u8> {
         to: at + 1,
         len: data.len(),
     })
+}
+
+/// Where a frequency column's own bytes start inside the chunk data.
+///
+/// `FrequencyStructure` is the top value, an offset and a scheme byte. Thirteen for a double column
+/// rather than the sixteen the C++ struct measures, because the bytes that follow are declared
+/// straight after the scheme byte and the padding that rounds the struct up to a multiple of eight
+/// is not part of them.
+const FREQUENT: usize = 13;
+
+/// Reads a frequency encoded double column.
+///
+/// This is the scheme for a column where nearly every row holds the same value. The chunk keeps that
+/// value once, then a Roaring bitmap of the rows that hold something else, then those rows' values
+/// as a double column in its own right with its own scheme byte.
+///
+/// Nothing records how many exceptions there are. The bitmap is the count, so it has to be read
+/// before the column after it can be asked for anything, and the two have to agree by construction
+/// rather than by a field that could disagree.
+fn frequency(data: &[u8], rows: usize, level: u32) -> Result<Vec<f64>> {
+    let top = one::<8, f64>(data, f64::from_le_bytes)?;
+    let offset = read_u32(data, 8, "a frequency column")?;
+    let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+    let scheme = byte(data, 12, "a frequency column")?;
+
+    let stored = data.get(FREQUENT..).ok_or(Error::Overrun {
+        what: "a frequency column",
+        claimed: FREQUENT,
+        available: data.len(),
+    })?;
+    let map = roaring::read(stored, rows)?;
+    let count = map.iter().filter(|row| **row).count();
+
+    // Skipped when the bitmap is empty, because the reference skips it too and there is no promise
+    // about what the scheme byte holds in that case.
+    let exceptions = if count == 0 {
+        Vec::new()
+    } else {
+        let at = FREQUENT.saturating_add(offset);
+        let rest = data.get(at..).ok_or(Error::Overrun {
+            what: "a frequency column",
+            claimed: at,
+            available: data.len(),
+        })?;
+        doubles(scheme, rest, count, level + 1)?
+    };
+
+    let mut exceptions = exceptions.into_iter();
+    let mut out = vec![top; rows];
+    for (slot, exceptional) in out.iter_mut().zip(map) {
+        if exceptional {
+            *slot = exceptions.next().ok_or(Error::Malformed {
+                what: "a frequency column",
+                why: "its bitmap holds more rows than it has values for",
+            })?;
+        }
+    }
+    Ok(out)
 }
 
 /// Where a pseudodecimal column's own bytes start inside the chunk data.

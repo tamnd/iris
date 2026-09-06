@@ -23,8 +23,9 @@
 //!
 //! Every nullmap encoding, which is two that say the same thing about every row and two that are a
 //! Roaring bitmap of the rows that are the exception. On the value side, `UNCOMPRESSED` and
-//! `ONE_VALUE` for all three column types, `BP` for integer columns, which is bit packing, and
-//! `DICT` and `RLE` for integer and double columns, and `PSEUDODECIMAL` for double columns.
+//! `ONE_VALUE` for all three column types, `BP` for integer columns, which is bit packing, `DICT`
+//! and `RLE` for integer and double columns, and `FREQUENCY` and `PSEUDODECIMAL` for double
+//! columns.
 //!
 //! The order that landed in was the framing and the trivial schemes first, so that getting from a
 //! part on disk to values in hand did not depend on any scheme being right, and then bit packing,
@@ -412,6 +413,65 @@ mod tests {
                 why: "it says more rows converted than the chunk holds",
             })
         ));
+    }
+
+    /// The bytes of a frequency chunk.
+    ///
+    /// The value most rows hold, an offset saying where the exceptions start, a scheme byte for
+    /// them, then a Roaring bitmap of the rows that are exceptions and then the exceptions
+    /// themselves. The offset is the length of the bitmap, which is also the only thing that says
+    /// how many exceptions there are, so both come from the rows named here.
+    fn frequent(top: f64, exceptional: &[u32], exceptions: &[u8]) -> Vec<u8> {
+        let mut map = vec![1u8];
+        map.extend_from_slice(
+            &u32::try_from(exceptional.len())
+                .expect("a small bitmap")
+                .to_le_bytes(),
+        );
+        for row in exceptional {
+            map.extend_from_slice(&row.to_le_bytes());
+        }
+
+        let mut bytes = top.to_le_bytes().to_vec();
+        bytes.extend_from_slice(
+            &u32::try_from(map.len())
+                .expect("a small bitmap")
+                .to_le_bytes(),
+        );
+        // The exceptions uncompressed, so this is about the frequency and not about them.
+        bytes.push(0);
+        bytes.extend_from_slice(&map);
+        bytes.extend_from_slice(exceptions);
+        bytes
+    }
+
+    #[test]
+    fn a_frequency_column_holds_its_top_value_everywhere_the_bitmap_does_not_say_otherwise() {
+        // Two exceptions, neither at the front and neither at the back, so a reader that had the
+        // bitmap out by one anywhere would land on the wrong rows rather than on the right ones.
+        let data = frequent(3.5, &[1, 3], &dbls(&[1.5, 2.5]));
+        let bytes = part(4, 0, 1, 5, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert_eq!(
+            part.chunk(0).expect("a chunk").decode().expect("values"),
+            Column::Double(vec![3.5, 1.5, 3.5, 2.5, 3.5])
+        );
+    }
+
+    #[test]
+    fn a_frequency_column_with_an_empty_bitmap_is_one_value_repeated() {
+        // The bitmap is the only thing that says how many exceptions there are, so an empty one has
+        // to mean the column after it is not read at all. Nothing follows the bitmap here, which is
+        // how this says so.
+        let data = frequent(-0.5, &[], &[]);
+        let bytes = part(4, 0, 1, 3, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert_eq!(
+            part.chunk(0).expect("a chunk").decode().expect("values"),
+            Column::Double(vec![-0.5, -0.5, -0.5])
+        );
     }
 
     #[test]
