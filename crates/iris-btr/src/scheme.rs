@@ -91,6 +91,13 @@ const RLE: u8 = 3;
 /// The code for `BP`, which is an integer scheme and has no counterpart for the other two types.
 const BP: u8 = 5;
 
+/// The code for `PSEUDODECIMAL`, which is a double scheme and shares its byte with integer `BP`.
+///
+/// Sharing a byte with a scheme for another column type is the ordinary case rather than a clash.
+/// A code only means anything alongside the column type it was read for, which is why there is a
+/// table per type up there rather than one table.
+const PSEUDODECIMAL: u8 = 5;
+
 /// How deep a cascade may go before this gives up on it.
 ///
 /// The reference's own configuration caps a cascade at three, and nothing it writes goes further.
@@ -161,6 +168,7 @@ fn doubles(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Vec<f64>> {
         ONE_VALUE => Ok(vec![one::<8, f64>(data, f64::from_le_bytes)?; rows]),
         DICT => dictionary::<8, f64>(data, rows, level, f64::from_le_bytes),
         RLE => run_length(data, rows, level, doubles),
+        PSEUDODECIMAL => pseudodecimal(data, rows, level),
         _ => Err(missing(ColumnType::Double, code)),
     }
 }
@@ -333,18 +341,8 @@ fn run_length<T: Copy>(data: &[u8], rows: usize, level: u32, decode: Decoder<T>)
     let runs = usize::try_from(runs).unwrap_or(usize::MAX);
     let offset = read_u32(data, 4, "a run length encoded column")?;
     let offset = usize::try_from(offset).unwrap_or(usize::MAX);
-    let values_scheme = *data.get(8).ok_or(Error::Truncated {
-        what: "a run length encoded column",
-        from: 8,
-        to: 9,
-        len: data.len(),
-    })?;
-    let counts_scheme = *data.get(9).ok_or(Error::Truncated {
-        what: "a run length encoded column",
-        from: 9,
-        to: 10,
-        len: data.len(),
-    })?;
+    let values_scheme = byte(data, 8, "a run length encoded column")?;
+    let counts_scheme = byte(data, 9, "a run length encoded column")?;
 
     // A run covers at least one row, so there is no reading a part that claims more runs than the
     // chunk has rows. Checked before either nested column is decoded, because the run count is what
@@ -392,6 +390,135 @@ fn run_length<T: Copy>(data: &[u8], rows: usize, level: u32, decode: Decoder<T>)
             what: "a run length encoded column",
             why: "its runs do not cover every row of the chunk",
         });
+    }
+    Ok(out)
+}
+
+/// Reads one byte out of a scheme's header, which in these headers is always a scheme code.
+fn byte(data: &[u8], at: usize, what: &'static str) -> Result<u8> {
+    data.get(at).copied().ok_or(Error::Truncated {
+        what,
+        from: at,
+        to: at + 1,
+        len: data.len(),
+    })
+}
+
+/// Where a pseudodecimal column's own bytes start inside the chunk data.
+///
+/// `DecimalStructure` is a count, four bytes, and three offsets, and it needs no padding to come
+/// out at twenty, so this is the size of the struct as well as the offset of what follows it.
+const DECIMAL: usize = 20;
+
+/// The negative powers of ten a pseudodecimal exponent selects.
+///
+/// The reference holds these as a table of literals and multiplies a row's number by one of them.
+/// Dividing by the matching power of ten would be the obvious thing to write and would not always
+/// come out with the same bits, so this multiplies too, and by the same twenty three values.
+const FRACTIONS_OF_TEN: [f64; 23] = [
+    1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12, 1e-13, 1e-14,
+    1e-15, 1e-16, 1e-17, 1e-18, 1e-19, 1e-20, 1e-21, 1e-22,
+];
+
+/// The exponent that means a row did not convert and its value is held as a patch.
+///
+/// One past the last real exponent, so it doubles as a sentinel and as the reason the table above
+/// stops where it does.
+const EXPONENT_EXCEPTION: i32 = 23;
+
+/// What the reference masks an exponent with before indexing the table of powers.
+const EXPONENT_MASK: i32 = 0x1f;
+
+/// Reads a pseudodecimal column.
+///
+/// This is the scheme for doubles that are really decimals: a row that can be written as an integer
+/// times a negative power of ten is stored as that integer and that power, and a row that cannot is
+/// stored as itself. So the chunk holds three columns in their own right, each with its own scheme
+/// byte, and an offset for each of the two that do not start at the front. The numbers are an
+/// integer column holding one entry a converted row, the exponents are an integer column holding
+/// one entry a row whether it converted or not, and the patches are a double column holding one
+/// entry a row that did not.
+///
+/// The exponents are what drives the whole thing. Walking them in order says which of the other two
+/// columns the next row comes out of, which is why neither of those needs a count of its own.
+///
+/// The chunk also holds a Roaring bitmap of the four row blocks that contain an exception. That is
+/// there to tell the reference's vectorised loop where it has to stop and fall back, and the
+/// exponents already say which rows those are, so this does not read it. The variant byte says
+/// which of those loops the reference took and all of them produce the same answer, so this does not
+/// read that either.
+///
+/// The mask on an exponent is the reference's own and is why an exponent has to be checked here. It
+/// takes five bits, so an exponent the reference never writes still comes out somewhere in nought to
+/// thirty one, and the eight of those past the end of the table are values it would read past its
+/// own table for. There is no answer to copy for those, so they are refused.
+fn pseudodecimal(data: &[u8], rows: usize, level: u32) -> Result<Vec<f64>> {
+    let converted = read_u32(data, 0, "a pseudodecimal column")?;
+    let converted = usize::try_from(converted).unwrap_or(usize::MAX);
+    let numbers_scheme = byte(data, 4, "a pseudodecimal column")?;
+    let exponents_scheme = byte(data, 5, "a pseudodecimal column")?;
+    let patches_scheme = byte(data, 6, "a pseudodecimal column")?;
+    let exponents_offset = read_u32(data, 8, "a pseudodecimal column")?;
+    let exponents_offset = usize::try_from(exponents_offset).unwrap_or(usize::MAX);
+    let patches_offset = read_u32(data, 12, "a pseudodecimal column")?;
+    let patches_offset = usize::try_from(patches_offset).unwrap_or(usize::MAX);
+
+    // The rows that did not convert are the rest of them. The reference works this out the same way
+    // and does not check it, so a count larger than the chunk wraps round on it and asks for an
+    // enormous allocation, which is the one thing here worth refusing outright.
+    let exception_rows = rows.checked_sub(converted).ok_or(Error::Malformed {
+        what: "a pseudodecimal column",
+        why: "it says more rows converted than the chunk holds",
+    })?;
+
+    let from = |offset: usize| -> Result<&[u8]> {
+        let at = DECIMAL.saturating_add(offset);
+        data.get(at..).ok_or(Error::Overrun {
+            what: "a pseudodecimal column",
+            claimed: at,
+            available: data.len(),
+        })
+    };
+
+    // Skipped when nothing converted, because the reference skips it too and writes no scheme byte
+    // worth reading in that case.
+    let numbers = if converted == 0 {
+        Vec::new()
+    } else {
+        integers(numbers_scheme, from(0)?, converted, level + 1)?
+    };
+    let exponents = integers(exponents_scheme, from(exponents_offset)?, rows, level + 1)?;
+    let patches = doubles(
+        patches_scheme,
+        from(patches_offset)?,
+        exception_rows,
+        level + 1,
+    )?;
+
+    let mut numbers = numbers.into_iter();
+    let mut patches = patches.into_iter();
+    let mut out = Vec::with_capacity(rows);
+    for exponent in exponents {
+        if exponent == EXPONENT_EXCEPTION {
+            out.push(patches.next().ok_or(Error::Malformed {
+                what: "a pseudodecimal column",
+                why: "more rows did not convert than it holds patches for",
+            })?);
+        } else {
+            let number = numbers.next().ok_or(Error::Malformed {
+                what: "a pseudodecimal column",
+                why: "more rows converted than it holds numbers for",
+            })?;
+            let index = usize::try_from(exponent & EXPONENT_MASK).unwrap_or(usize::MAX);
+            let fraction = FRACTIONS_OF_TEN
+                .get(index)
+                .copied()
+                .ok_or(Error::Malformed {
+                    what: "a pseudodecimal column",
+                    why: "an exponent selects a power of ten the reference does not have",
+                })?;
+            out.push(f64::from(number) * fraction);
+        }
     }
     Ok(out)
 }

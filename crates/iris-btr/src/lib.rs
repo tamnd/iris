@@ -24,7 +24,7 @@
 //! Every nullmap encoding, which is two that say the same thing about every row and two that are a
 //! Roaring bitmap of the rows that are the exception. On the value side, `UNCOMPRESSED` and
 //! `ONE_VALUE` for all three column types, `BP` for integer columns, which is bit packing, and
-//! `DICT` and `RLE` for integer and double columns.
+//! `DICT` and `RLE` for integer and double columns, and `PSEUDODECIMAL` for double columns.
 //!
 //! The order that landed in was the framing and the trivial schemes first, so that getting from a
 //! part on disk to values in hand did not depend on any scheme being right, and then bit packing,
@@ -308,6 +308,108 @@ mod tests {
             Err(Error::Malformed {
                 what: "a run length encoded column",
                 why: "it has more runs than the chunk has rows",
+            })
+        ));
+    }
+
+    /// A little endian double column, which is what a pseudodecimal holds its patches as.
+    fn dbls(values: &[f64]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// The bytes of a pseudodecimal chunk.
+    ///
+    /// A count of the rows that converted, a scheme byte each for the numbers, the exponents and
+    /// the patches, a variant byte, and then an offset each for the exponents, the patches and the
+    /// exceptions bitmap. The three columns follow in that order, so the offsets are written from
+    /// their lengths rather than passed in.
+    ///
+    /// The exceptions bitmap the last offset points at is left off the end on purpose. Nothing
+    /// reads it, because the exponents already say which rows are exceptions, and a chunk that
+    /// stops before it is how these tests say so.
+    fn decimal(converted: u32, numbers: &[u8], exponents: &[u8], patches: &[u8]) -> Vec<u8> {
+        let mut bytes = converted.to_le_bytes().to_vec();
+        // All three nested columns uncompressed, and the variant byte is one the reference reads
+        // only to pick between loops that agree.
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+
+        let width = |bytes: &[u8]| u32::try_from(bytes.len()).expect("a small column");
+        let exponents_at = width(numbers);
+        let patches_at = exponents_at + width(exponents);
+        let map_at = patches_at + width(patches);
+        bytes.extend_from_slice(&exponents_at.to_le_bytes());
+        bytes.extend_from_slice(&patches_at.to_le_bytes());
+        bytes.extend_from_slice(&map_at.to_le_bytes());
+
+        bytes.extend_from_slice(numbers);
+        bytes.extend_from_slice(exponents);
+        bytes.extend_from_slice(patches);
+        bytes
+    }
+
+    #[test]
+    fn a_pseudodecimal_column_multiplies_each_number_by_its_power_of_ten() {
+        let data = decimal(3, &ints(&[25, 7, 1234]), &ints(&[1, 0, 2]), &[]);
+        let bytes = part(5, 0, 1, 3, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert_eq!(
+            part.chunk(0).expect("a chunk").decode().expect("values"),
+            Column::Double(vec![2.5, 7.0, 12.34])
+        );
+    }
+
+    #[test]
+    fn a_row_that_did_not_convert_comes_out_of_the_patches() {
+        // The exponents are the only thing that says which column the next row comes from, and they
+        // are the only column here holding an entry a row. Two converted rows and one that did not,
+        // with the one that did not in the middle, so a reader that took the patches in the wrong
+        // order or off the wrong end would come out visibly wrong rather than plausibly.
+        let data = decimal(
+            2,
+            &ints(&[5, 8]),
+            &ints(&[0, 23, 0]),
+            &dbls(&[std::f64::consts::PI]),
+        );
+        let bytes = part(5, 0, 1, 3, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert_eq!(
+            part.chunk(0).expect("a chunk").decode().expect("values"),
+            Column::Double(vec![5.0, std::f64::consts::PI, 8.0])
+        );
+    }
+
+    #[test]
+    fn an_exponent_the_table_of_powers_does_not_have_is_refused() {
+        // The reference masks an exponent to five bits and indexes a table of twenty three with the
+        // result, so this is one of the eight values it would read past its own table for.
+        let data = decimal(1, &ints(&[1]), &ints(&[30]), &[]);
+        let bytes = part(5, 0, 1, 1, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a pseudodecimal column",
+                why: "an exponent selects a power of ten the reference does not have",
+            })
+        ));
+    }
+
+    #[test]
+    fn more_rows_converted_than_the_chunk_holds_is_refused() {
+        // The reference takes the rows that did not convert to be the rest of them and subtracts
+        // without checking, so a count like this wraps round on it into an enormous allocation.
+        let data = decimal(5, &ints(&[1, 2, 3, 4, 5]), &ints(&[0, 0]), &[]);
+        let bytes = part(5, 0, 1, 2, &data, &[]);
+
+        let part = Part::parse(&bytes).expect("a part");
+        assert!(matches!(
+            part.chunk(0).expect("a chunk").decode(),
+            Err(Error::Malformed {
+                what: "a pseudodecimal column",
+                why: "it says more rows converted than the chunk holds",
             })
         ));
     }
