@@ -68,6 +68,19 @@ pub enum Error {
         code: u8,
     },
 
+    /// A corner of a scheme this crate reads that it does not read.
+    ///
+    /// The reference sometimes writes two layouts under one scheme code and picks between them with
+    /// a flag rather than with the code. Separate from [`Error::UnsupportedScheme`] because the
+    /// scheme itself is implemented and this is one shape of it that is not.
+    #[error("{what} is a layout this does not read yet: {why}")]
+    UnsupportedLayout {
+        /// What was being read.
+        what: &'static str,
+        /// Which shape of it this is.
+        why: &'static str,
+    },
+
     /// A scheme code the reference does not define for this column type.
     #[error("{column} scheme {code} is not one the reference defines")]
     UnknownScheme {
