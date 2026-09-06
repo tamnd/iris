@@ -1,0 +1,24 @@
+# Written by conformance/btrblocks/generate.cpp against the reference at
+# c950c3c01c1fbf91007936b05781d431a29a60d3. One line per case: name, type, rows, scheme.
+int-uncompressed	integer	8192	UNCOMPRESSED
+int-one-value	integer	8192	ONE_VALUE
+int-dict	integer	8192	DICT -> ([int] codes) BP
+int-rle	integer	8192	RLE -> ([valueType] values) BP -> ([int] counts) RLE -> ([valueType] values) UNCOMPRESSED -> ([int] counts) UNCOMPRESSED
+int-pfor	integer	8192	PFOR
+int-bp	integer	8192	BP
+dbl-uncompressed	double	8192	UNCOMPRESSED
+dbl-one-value	double	8192	ONE_VALUE
+dbl-dict	double	8192	DICT -> ([int] codes) BP
+dbl-rle	double	8192	RLE -> ([valueType] values) PSEUDODECIMAL -> ([int] significant digits) BP -> ([int] exponents) RLE -> ([valueType] values) UNCOMPRESSED -> ([int] counts) UNCOMPRESSED -> ([double] patches) UNCOMPRESSED -> ([int] counts) RLE -> ([valueType] values) UNCOMPRESSED -> ([int] counts) UNCOMPRESSED
+dbl-frequency	double	8192	FREQUENCY -> ([NumberType] exceptions) PSEUDODECIMAL -> ([int] significant digits) BP -> ([int] exponents) BP -> ([double] patches) UNCOMPRESSED
+dbl-pseudodecimal	double	8192	PSEUDODECIMAL -> ([int] significant digits) PFOR -> ([int] exponents) DICT -> ([int] codes) BP -> ([double] patches) UNCOMPRESSED
+str-uncompressed	string	8192	UNCOMPRESSED
+str-one-value	string	8192	ONE_VALUE
+str-dict	string	8192	S_DICT_RAW -> ([int] codes) BP
+str-fsst	string	8192	FSST -> ([int] offsets) BP
+int-dict-some-null	integer	8192	DICT -> ([int] codes) BP
+dbl-pseudodecimal-some-null	double	8192	PSEUDODECIMAL -> ([int] significant digits) PFOR -> ([int] exponents) DICT -> ([int] codes) BP -> ([double] patches) UNCOMPRESSED
+str-fsst-some-null	string	8192	FSST -> ([int] offsets) BP
+int-all-null	integer	8192	ONE_VALUE
+dbl-all-null	double	8192	ONE_VALUE
+str-all-null	string	8192	ONE_VALUE
