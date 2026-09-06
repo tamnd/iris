@@ -23,9 +23,9 @@
 //!
 //! Every nullmap encoding, which is two that say the same thing about every row and two that are a
 //! Roaring bitmap of the rows that are the exception. On the value side, `UNCOMPRESSED` and
-//! `ONE_VALUE` for all three column types, `BP` for integer columns, which is bit packing, `DICT`
-//! and `RLE` for integer and double columns, and `FREQUENCY` and `PSEUDODECIMAL` for double
-//! columns.
+//! `ONE_VALUE` for all three column types, `BP` and `PFOR` for integer columns, which are bit
+//! packing and bit packing with the values that did not fit kept to one side, `DICT` and `RLE` for
+//! integer and double columns, and `FREQUENCY` and `PSEUDODECIMAL` for double columns.
 //!
 //! The order that landed in was the framing and the trivial schemes first, so that getting from a
 //! part on disk to values in hand did not depend on any scheme being right, and then bit packing,
@@ -573,7 +573,7 @@ mod tests {
     fn a_scheme_that_is_not_written_yet_is_told_apart_from_one_that_does_not_exist() {
         // The difference matters to whoever reads the failure. One of these says the part is fine
         // and iris is behind, and the other says the part did not come from the reference.
-        let behind = part(4, 0, 0, 1, &[0; 8], &[]);
+        let behind = part(25, 0, 0, 1, &[0; 8], &[]);
         let error = Part::parse(&behind)
             .expect("a part")
             .chunk(0)
@@ -581,10 +581,10 @@ mod tests {
             .decode()
             .unwrap_err();
         assert!(
-            matches!(error, Error::UnsupportedScheme { code: 4, .. }),
+            matches!(error, Error::UnsupportedScheme { code: 25, .. }),
             "{error}"
         );
-        assert!(format!("{error}").contains("PFOR"), "{error}");
+        assert!(format!("{error}").contains("FREQUENCY"), "{error}");
 
         let nonsense = part(200, 0, 0, 1, &[0; 8], &[]);
         let error = Part::parse(&nonsense)

@@ -96,6 +96,9 @@ const RLE: u8 = 3;
 /// with it and a scheme nothing grades is a claim rather than an implementation.
 const FREQUENCY: u8 = 4;
 
+/// The code for `PFOR`, which is an integer scheme and shares its byte with double `FREQUENCY`.
+const PFOR: u8 = 4;
+
 /// The code for `BP`, which is an integer scheme and has no counterpart for the other two types.
 const BP: u8 = 5;
 
@@ -161,7 +164,8 @@ fn integers(code: u8, data: &[u8], rows: usize, level: u32) -> Result<Vec<i32>> 
     match code {
         UNCOMPRESSED => fixed(data, rows, i32::from_le_bytes),
         ONE_VALUE => Ok(vec![one::<4, i32>(data, i32::from_le_bytes)?; rows]),
-        BP => bit_packed(data, rows),
+        PFOR => codec_framed(data, rows, "a patched column", fastpfor::patched),
+        BP => codec_framed(data, rows, "a bit packed column", fastpfor::binary_packed),
         DICT => dictionary::<4, i32>(data, rows, level, i32::from_le_bytes),
         RLE => run_length(data, rows, level, integers),
         _ => Err(missing(ColumnType::Integer, code)),
@@ -590,39 +594,39 @@ fn pseudodecimal(data: &[u8], rows: usize, level: u32) -> Result<Vec<f64>> {
     Ok(out)
 }
 
-/// Reads a bit packed integer column.
+/// Reads an integer column that was handed to one of the `FastPFOR` codecs.
 ///
-/// The chunk holds the reference's `XPBPStructure`: a count of the thirty two bit words the codec
-/// wrote, then a single padding byte, then the words themselves. The padding is there because the
-/// reference aligns the pointer it hands the codec at compression time, so how many bytes it had to
-/// skip depends on where that buffer happened to sit in memory. It is recorded in the chunk rather
-/// than derived from anything, and a reader has no way to work it out for itself, so this reads it
-/// and skips the same number of bytes.
+/// Both of the schemes that do that store it the same way, in the reference's `XPBPStructure`: a
+/// count of the thirty two bit words the codec wrote, then a single padding byte, then the words
+/// themselves. The padding is there because the reference aligns the pointer it hands the codec at
+/// compression time, so how many bytes it had to skip depends on where that buffer happened to sit
+/// in memory. It is recorded in the chunk rather than derived from anything, and a reader has no way
+/// to work it out for itself, so this reads it and skips the same number of bytes.
 ///
-/// The values come back as unsigned because that is what the codec deals in. The reference hands it
-/// the signed values reinterpreted, so turning them back is a reinterpretation and not a conversion,
-/// and a negative value is one that needed all thirty two bits.
-fn bit_packed(data: &[u8], rows: usize) -> Result<Vec<i32>> {
-    let words = read_u32(data, 0, "a bit packed column")?;
+/// The values come back as unsigned because that is what the codecs deal in. The reference hands
+/// them the signed values reinterpreted, so turning them back is a reinterpretation and not a
+/// conversion, and a negative value is one that needed all thirty two bits.
+fn codec_framed(
+    data: &[u8],
+    rows: usize,
+    what: &'static str,
+    codec: fn(&[u8], usize, usize) -> Result<Vec<u32>>,
+) -> Result<Vec<i32>> {
+    let words = read_u32(data, 0, what)?;
     let words = usize::try_from(words).unwrap_or(usize::MAX);
-    let padding = usize::from(*data.get(4).ok_or(Error::Truncated {
-        what: "a bit packed column",
-        from: 4,
-        to: 5,
-        len: data.len(),
-    })?);
+    let padding = usize::from(byte(data, 4, what)?);
 
     // Five, not the eight the C++ struct measures, because `data` is declared straight after the
     // padding byte and the trailing bytes that round the struct up to a multiple of four are not
     // part of it.
     let at = 5 + padding;
     let body = data.get(at..).ok_or(Error::Overrun {
-        what: "a bit packed column",
+        what,
         claimed: at,
         available: data.len(),
     })?;
 
-    Ok(fastpfor::binary_packed(body, words, rows)?
+    Ok(codec(body, words, rows)?
         .into_iter()
         .map(u32::cast_signed)
         .collect())
