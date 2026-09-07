@@ -2174,25 +2174,25 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "iris-abi"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "iris-btr"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "iris-decoder"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "iris-abi",
 ]
 
 [[package]]
 name = "iris-df"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2210,7 +2210,7 @@ dependencies = [
 
 [[package]]
 name = "iris-format"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "iris-abi",
@@ -2220,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "iris-guard"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "arrow-schema",
  "iris-abi",
@@ -2229,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "iris-native"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "iris-abi",
  "iris-trust",
@@ -2237,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "iris-runtime"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "iris-source"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "libc",
@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "iris-trust"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "iris-abi",
  "iris-format",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "iris-vm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "iris-abi",
  "iris-source",
@@ -2297,7 +2297,7 @@ dependencies = [
 
 [[package]]
 name = "irisdb"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2545,11 +2545,11 @@ dependencies = [
 
 [[package]]
 name = "m0-scan"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "m5-decode"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "iris-btr",
 ]
