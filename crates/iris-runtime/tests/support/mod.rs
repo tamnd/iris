@@ -36,16 +36,21 @@
 #![allow(dead_code)]
 
 use std::fs::File;
+use std::future::poll_fn;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use std::task::Poll;
 
 use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
-use iris_abi::{ABI_MAJOR, ABI_MINOR, Capability, CapabilitySet};
+use iris_abi::{ABI_MAJOR, ABI_MINOR, Capability, CapabilitySet, Hello, Node, ScanRequest};
 use iris_format::{Builder, SchemaEncoding, SectionKind};
-use iris_runtime::schema_to_ipc;
+use iris_native::{Case, Corpus, Differential, Kernel, Mismatch, Native, Scanning};
+use iris_runtime::{RESIDENT_TERMS, WINDOWED_TERMS, schema_to_ipc};
+use iris_source::{Fetch, RangeSource, SourceError};
+use iris_vm::{Handshake, RawBatch, Vm};
 
 /// The workspace root, from this crate's manifest.
 pub(crate) fn workspace_root() -> PathBuf {
@@ -298,6 +303,190 @@ pub(crate) fn write_container(dir: &str, name: &str, builder: &Builder) -> (Scra
         "the builder said it wrote a different number of bytes than the file holds"
     );
     (scratch, len)
+}
+
+/// Asks a source for a range and waits for it without holding a thread.
+///
+/// A source that says it will wake the task is taken at its word, and one that says it will not is
+/// asked again on the next poll, which is the arrangement `RangeSource::wake_when_ready` describes.
+/// Nothing here actually goes pending, since every fixture these tests use is resident, and it is
+/// written this way because a native implementation that spun here would give back the property M6
+/// was about.
+pub(crate) async fn read(
+    source: &mut (dyn RangeSource + Send),
+    at: u64,
+    len: usize,
+) -> Result<Vec<u8>, SourceError> {
+    poll_fn(|cx| {
+        match source.range(at, len) {
+            Err(err) => return Poll::Ready(Err(err)),
+            Ok(Fetch::Ready(bytes)) => return Poll::Ready(Ok(bytes.to_vec())),
+            // Pending, and anything a later version of the trait adds, means come back later.
+            Ok(_) => {}
+        }
+        if !source.wake_when_ready(cx.waker()) {
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+/// What the fixed width module answers a [`Hello`] with.
+///
+/// A native implementation of it has to answer the same way, down to the decoder id, because the
+/// host negotiates against this and a substitution that negotiated differently would be a different
+/// decoder. The differential run compares the two answers before it compares a single row.
+pub(crate) fn fixedwidth_handshake() -> Handshake {
+    Handshake {
+        abi_major: ABI_MAJOR,
+        abi_minor: ABI_MINOR,
+        required: CapabilitySet::new().with(Capability::RANDOM_ACCESS),
+        optional: CapabilitySet::new().with(Capability::PROJECTION),
+        decoder_id: "fixedwidth".to_owned(),
+    }
+}
+
+/// Decodes the fixed width layout the way `crates/iris-decoder/examples/fixedwidth.rs` decodes it.
+///
+/// Written from the module rather than from the description of the format, because the thing being
+/// reproduced is not "the right values" but "the same bytes in the same batches". The two places
+/// that is easy to get wrong are both here: the rows are cut into batches of `max_batch_rows`, which
+/// the module takes from the session it opened with and this takes from the [`Hello`] it is handed,
+/// and every array carries an empty validity buffer before its values, because the schema decides
+/// how many buffers there are and leaving one out would shift every buffer after it.
+pub(crate) async fn fixedwidth_batches(
+    hello: &Hello,
+    request: &ScanRequest<'_>,
+    source: &mut (dyn RangeSource + Send),
+) -> iris_native::Result<Vec<RawBatch>> {
+    let header = read(source, 0, 16).await?;
+    let rows = u64::from_le_bytes(header[..8].try_into().expect("eight bytes"));
+    let columns = u64::from_le_bytes(header[8..].try_into().expect("eight bytes"));
+
+    // The module refuses a header describing more data than the source holds, and it refuses it when
+    // it opens rather than partway through a batch. This is the same refusal one call later, which
+    // is as close as a native implementation gets: there is no open here to refuse from.
+    let declared = rows
+        .checked_mul(columns)
+        .and_then(|values| values.checked_mul(WIDTH))
+        .and_then(|bytes| bytes.checked_add(HEADER))
+        .ok_or_else(|| {
+            iris_native::Error::malformed("the header describes more bytes than exist anywhere")
+        })?;
+    if hello.source_bytes != 0 && declared > hello.source_bytes {
+        return Err(iris_native::Error::malformed(
+            "the header describes more rows than the source has bytes for",
+        ));
+    }
+
+    let wanted_columns: Vec<u64> = if request.projection.is_empty() {
+        (0..columns).collect()
+    } else {
+        request.projection.iter().map(u64::from).collect()
+    };
+    if wanted_columns.iter().any(|&column| column >= columns) {
+        return Err(iris_native::Error::malformed(
+            "the projection names a column this dataset does not have",
+        ));
+    }
+
+    let batch_rows = hello.max_batch_rows.max(1);
+    let start = request.row_start.min(rows);
+    let wanted = request.row_count.min(rows - start);
+
+    let mut batches = Vec::new();
+    let mut done = 0;
+    while done < wanted {
+        let count = batch_rows.min(wanted - done);
+        let mut batch = RawBatch {
+            rows: count,
+            nodes: Vec::new(),
+            buffers: Vec::new(),
+        };
+        for &column in &wanted_columns {
+            let at = HEADER + (column * rows + start + done) * WIDTH;
+            let len = usize::try_from(count * WIDTH).expect("a fixture batch fits in memory");
+            batch.nodes.push(Node {
+                length: count,
+                null_count: 0,
+            });
+            batch.buffers.push(Vec::new());
+            batch.buffers.push(read(source, at, len).await?);
+        }
+        batches.push(batch);
+        done += count;
+    }
+    Ok(batches)
+}
+
+/// A native implementation of the fixed width decoder that agrees with it.
+#[derive(Debug)]
+pub(crate) struct FixedWidth;
+
+impl Native for FixedWidth {
+    fn handshake(&self, _hello: &Hello) -> iris_native::Result<Handshake> {
+        Ok(fixedwidth_handshake())
+    }
+
+    fn scan<'a>(
+        &'a self,
+        hello: &'a Hello,
+        request: &'a ScanRequest<'a>,
+        source: &'a mut (dyn RangeSource + Send),
+    ) -> Scanning<'a> {
+        Box::pin(fixedwidth_batches(hello, request, source))
+    }
+}
+
+/// The rows in the largest case [`native_corpus`] holds.
+///
+/// Named because more than one test turns on it. A container larger than this is a dataset the
+/// corpus never covered, which is what makes the honest residual demonstrable rather than a remark.
+pub(crate) const CORPUS_ROWS: u64 = 97;
+
+/// The datasets a native fixed width kernel is proved against.
+///
+/// Three shapes rather than one large one. A single column dataset is where an implementation that
+/// confuses the row stride with the column stride still passes, a three column one is where the
+/// projection order shows, and a one row one is where the ends of a range meet in the middle. None
+/// of them is the shape of the container the tests then read, which is deliberate: a corpus that
+/// happened to contain the exact dataset under test would prove more here than a corpus proves in
+/// general.
+pub(crate) fn native_corpus() -> Corpus {
+    Corpus::new()
+        .with_case(Case::new("one row, one column", source(1, 1), 1, 1))
+        .with_case(Case::new(
+            "a single column of readings",
+            source(CORPUS_ROWS, 1),
+            CORPUS_ROWS,
+            1,
+        ))
+        .with_case(Case::new("three columns", source(64, 3), 64, 3))
+}
+
+/// Runs a differential of this implementation against the fixed width module, and reports what came
+/// of it.
+///
+/// The engine is built here and dropped here. A [`Kernel`] borrows nothing from it, so a caller ends
+/// up holding the result of a run rather than the machinery of one.
+pub(crate) fn attempt(
+    native: Arc<dyn Native>,
+    corpus: &Corpus,
+    terms: &[CapabilitySet],
+) -> Result<Kernel, Mismatch> {
+    let vm = Vm::new().expect("a compiler starts");
+    let mut run = Differential::new(&vm, decoder_module());
+    for &set in terms {
+        run = run.offering(set);
+    }
+    run.verify(native, corpus)
+}
+
+/// The same run, under both sets of terms this host offers, for a kernel expected to agree.
+pub(crate) fn prove(native: Arc<dyn Native>) -> Kernel {
+    attempt(native, &native_corpus(), &[RESIDENT_TERMS, WINDOWED_TERMS])
+        .expect("this implementation agrees with the module on every case in the corpus")
 }
 
 /// Every value in a column of the batches, in order.

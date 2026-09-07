@@ -6,28 +6,29 @@
 //! `fixedwidth` would get this host's native code, running in this process with nothing around it,
 //! against bytes nobody has ever compared it to. These tests are about that not happening.
 //!
-//! The native implementation below returns deliberately wrong values, offset by [`MARK`]. That is
-//! the only way for the rows themselves to say which side produced them, and it is fine here because
-//! this is a test decoder and being wrong is its whole job. A real native kernel has to agree with
-//! the module it stands in for, and the box that makes it prove that is the differential run, which
-//! is the next one in the milestone rather than this one.
+//! The implementation they register is a real one. It reads the layout the module reads and produces
+//! the same batches, and it reaches a registry the only way anything reaches one, which is by coming
+//! out of a differential run against the module it stands in for. That means these tests cannot tell
+//! the two paths apart by looking at the values, because agreeing on the values is the entry
+//! requirement. They tell them apart by asking the dataset which path it took and by asking the
+//! runtime how many decoders it compiled, which is the honest question anyway: substitution is
+//! supposed to be invisible in the answers and visible in the work.
 
 mod support;
 
-use std::future::poll_fn;
 use std::sync::Arc;
-use std::task::Poll;
 
 use iris_abi::{ABI_MAJOR, ABI_MINOR, Capability, CapabilitySet, Hello, Node, ScanRequest};
 use iris_format::{Builder, Digest, SchemaEncoding, SectionKind};
-use iris_native::{Error, Native, Registry, Result, Scanning};
-use iris_runtime::{Runtime, schema_to_ipc};
-use iris_source::{Fetch, MemorySource, RangeSource, SourceError};
+use iris_native::{Native, Registry, Result, Scanning};
+use iris_runtime::{RESIDENT_TERMS, Runtime, WINDOWED_TERMS, schema_to_ipc};
+use iris_source::{MemorySource, RangeSource};
 use iris_vm::{Handshake, RawBatch};
 
 use support::{
-    HEADER, WIDTH, builder, cell, column_values, decoder_module, flat_source, passthrough_module,
-    schema,
+    CORPUS_ROWS, FixedWidth, attempt, builder, cell, column_values, decoder_module,
+    fixedwidth_batches, fixedwidth_handshake, flat_source, native_corpus, passthrough_module,
+    prove, schema,
 };
 
 /// Small, because none of this is about how long a scan takes.
@@ -36,117 +37,9 @@ const ROWS: u64 = 512;
 /// Two, so a projection has something to leave out.
 const COLUMNS: u64 = 2;
 
-/// What the native implementation adds to every value it produces.
-///
-/// Far outside the range [`cell`] produces, so a value that came back from here cannot be mistaken
-/// for one the module in the container produced, and the assertion failure says which path ran
-/// rather than being an off by one.
-const MARK: i64 = 700_000_000_000;
-
-/// A native implementation of the fixed width decoder that is wrong on purpose.
-///
-/// It reads the same layout the module reads, honours the same request, and then adds [`MARK`] to
-/// every value on the way out. See the note at the top of this file for why it is like that.
-#[derive(Debug)]
-struct Rewrite;
-
-impl Native for Rewrite {
-    fn handshake(&self, _hello: &Hello) -> Result<Handshake> {
-        // The same terms the module asks for, because this stands in for that module and a
-        // substitution that negotiated differently would be a different decoder.
-        Ok(Handshake {
-            abi_major: ABI_MAJOR,
-            abi_minor: ABI_MINOR,
-            required: CapabilitySet::new().with(Capability::RANDOM_ACCESS),
-            optional: CapabilitySet::new().with(Capability::PROJECTION),
-            decoder_id: "fixedwidth".to_owned(),
-        })
-    }
-
-    fn scan<'a>(
-        &'a self,
-        request: &'a ScanRequest<'a>,
-        source: &'a mut (dyn RangeSource + Send),
-    ) -> Scanning<'a> {
-        Box::pin(async move {
-            let header = read(source, 0, 16).await?;
-            let rows = u64::from_le_bytes(header[..8].try_into().expect("eight bytes"));
-            let columns = u64::from_le_bytes(header[8..].try_into().expect("eight bytes"));
-
-            let wanted: Vec<u64> = if request.projection.is_empty() {
-                (0..columns).collect()
-            } else {
-                request.projection.iter().map(u64::from).collect()
-            };
-            if wanted.iter().any(|&column| column >= columns) {
-                return Err(Error::malformed(
-                    "the projection names a column this dataset does not have",
-                ));
-            }
-
-            let start = request.row_start.min(rows);
-            let count = request.row_count.min(rows - start);
-            let mut batch = RawBatch {
-                rows: count,
-                nodes: Vec::new(),
-                buffers: Vec::new(),
-            };
-            for column in wanted {
-                let at = HEADER + (column * rows + start) * WIDTH;
-                let len = usize::try_from(count * WIDTH).expect("a test fixture fits in memory");
-                let values = read(source, at, len).await?;
-                let marked: Vec<u8> = values
-                    .as_chunks::<8>()
-                    .0
-                    .iter()
-                    .map(|slot| i64::from_le_bytes(*slot) + MARK)
-                    .flat_map(i64::to_le_bytes)
-                    .collect();
-
-                batch.nodes.push(Node {
-                    length: count,
-                    null_count: 0,
-                });
-                // An empty validity buffer is how a batch says every value is present. The entry
-                // still has to be there, because the schema decides how many buffers there are.
-                batch.buffers.push(Vec::new());
-                batch.buffers.push(marked);
-            }
-            Ok(vec![batch])
-        })
-    }
-}
-
-/// Asks a source for a range and waits for it without holding a thread.
-///
-/// A source that says it will wake the task is taken at its word, and one that says it will not is
-/// asked again on the next poll, which is the arrangement `RangeSource::wake_when_ready` describes.
-/// Nothing in this file actually goes pending, since both fixtures are resident, and it is written
-/// this way because a native implementation that spun here would give back the property M6 was
-/// about.
-async fn read(
-    source: &mut (dyn RangeSource + Send),
-    at: u64,
-    len: usize,
-) -> std::result::Result<Vec<u8>, SourceError> {
-    poll_fn(|cx| {
-        match source.range(at, len) {
-            Err(err) => return Poll::Ready(Err(err)),
-            Ok(Fetch::Ready(bytes)) => return Poll::Ready(Ok(bytes.to_vec())),
-            // Pending, and anything a later version of the trait adds, means come back later.
-            Ok(_) => {}
-        }
-        if !source.wake_when_ready(cx.waker()) {
-            cx.waker().wake_by_ref();
-        }
-        Poll::Pending
-    })
-    .await
-}
-
-/// A registry that runs [`Rewrite`] in place of the module the fixtures carry.
+/// A registry that runs the native fixed width implementation in place of the module.
 fn registry() -> Registry {
-    Registry::new().with_module(decoder_module(), Arc::new(Rewrite))
+    Registry::new().with(prove(Arc::new(FixedWidth)))
 }
 
 /// The ordinary fixture: the fixed width module, the data it reads, and the name it goes by.
@@ -179,14 +72,9 @@ fn impostor() -> Vec<u8> {
     builder.build().expect("the container is writable")
 }
 
-/// What a column reads as when the module in the container decoded it.
+/// What a column of the fixture reads as, whichever side decoded it.
 fn plain(column: u64) -> Vec<i64> {
     (0..ROWS).map(|row| cell(column, row)).collect()
-}
-
-/// What a column reads as when [`Rewrite`] decoded it.
-fn marked(column: u64) -> Vec<i64> {
-    (0..ROWS).map(|row| cell(column, row) + MARK).collect()
 }
 
 #[test]
@@ -203,8 +91,8 @@ fn a_decoder_registered_under_its_own_digest_runs_native() {
     );
 
     let batches = dataset.scan().expect("the scan runs");
-    assert_eq!(column_values(&batches, 0), marked(0));
-    assert_eq!(column_values(&batches, 1), marked(1));
+    assert_eq!(column_values(&batches, 0), plain(0));
+    assert_eq!(column_values(&batches, 1), plain(1));
 
     assert_eq!(
         runtime.decoders_compiled(),
@@ -257,18 +145,22 @@ fn an_empty_registry_is_every_container_in_the_sandbox() {
 }
 
 #[test]
-fn registering_by_module_computes_the_digest_the_container_carries() {
+fn a_kernel_carries_the_digest_of_the_module_it_was_proved_against() {
     let bytes = container();
     let dataset = Runtime::new()
         .expect("a runtime starts")
         .open(&bytes)
         .expect("the container opens");
 
-    // The two ways of naming a decoder agree. A host holding the module it wrote a rewrite of does
-    // not have to copy a hex string out of anywhere, which is worth saying with a test because a
-    // mistyped digest fails by silently never substituting.
+    // Nobody types a digest anywhere. The differential run compiled the module it was handed, so the
+    // key a kernel goes in under is derived from the same bytes the container carries, which is worth
+    // saying with a test because a mistyped digest fails by silently never substituting.
     assert_eq!(dataset.decoder_digest(), Digest::of(decoder_module()));
-    assert!(registry().get(&dataset.decoder_digest()).is_some());
+    assert!(
+        registry()
+            .get(&dataset.decoder_digest(), RESIDENT_TERMS)
+            .is_some()
+    );
 }
 
 #[test]
@@ -283,7 +175,48 @@ fn substitution_is_the_same_decision_on_the_windowed_path() {
 
     assert!(dataset.decoder_is_native());
     let batches = dataset.scan().expect("the scan runs");
-    assert_eq!(column_values(&batches, 0), marked(0));
+    assert_eq!(column_values(&batches, 0), plain(0));
+    assert_eq!(
+        runtime.decoders_compiled(),
+        0,
+        "the windowed path substituted too, so there was still nothing to compile"
+    );
+}
+
+#[test]
+fn a_kernel_proved_for_one_path_is_not_run_on_the_other() {
+    // The same implementation, proved under the terms the resident path offers and under nothing
+    // else. It would in fact be right on the windowed path as well, and that is the point: nobody
+    // has compared it there, so the host declines to assume it and falls back to the sandbox.
+    let kernel = attempt(Arc::new(FixedWidth), &native_corpus(), &[RESIDENT_TERMS])
+        .expect("the implementation agrees with the module under the resident terms");
+    let registry = Registry::new().with(kernel);
+
+    let bytes = container();
+    let runtime = Runtime::new()
+        .expect("a runtime starts")
+        .with_native(registry);
+
+    assert!(
+        runtime
+            .open(&bytes)
+            .expect("the container opens")
+            .decoder_is_native(),
+        "the terms this was proved under are the ones the resident path offers"
+    );
+
+    let mut windowed = runtime
+        .open_windowed(Box::new(MemorySource::new(bytes)))
+        .expect("the container opens");
+    assert!(
+        !windowed.decoder_is_native(),
+        "the windowed path offers more than anybody ran this implementation under"
+    );
+    assert_eq!(
+        column_values(&windowed.scan().expect("the scan runs"), 0),
+        plain(0),
+        "and the fallback is a working scan rather than a failure"
+    );
 }
 
 #[test]
@@ -297,7 +230,7 @@ fn a_projection_still_goes_through_the_host_when_the_decoder_is_native() {
     let batches = dataset.scan_columns(&[1]).expect("the scan runs");
     assert_eq!(batches[0].num_columns(), 1);
     assert_eq!(batches[0].schema().field(0).name(), "c1");
-    assert_eq!(column_values(&batches, 0), marked(1));
+    assert_eq!(column_values(&batches, 0), plain(1));
 
     // The bounds check on a projection belongs to the host and stays there. Native code is not
     // trusted with it any more than a guest is, and the error names the index rather than being
@@ -314,36 +247,42 @@ fn a_projection_still_goes_through_the_host_when_the_decoder_is_native() {
 
 #[test]
 fn what_a_native_implementation_emits_is_checked_like_anything_else() {
-    /// Claims more rows than it hands over buffers for.
+    /// Right about every dataset the corpus holds and wrong about a larger one.
     ///
-    /// A guest that did this is refused by `iris-guard` before an array is built. Native code has no
-    /// sandbox around it and is easier to trust for that reason, and it is decoding a dataset the
-    /// host did not write, so it gets the same treatment.
+    /// This is the residual a differential run leaves behind, written out on purpose. The run proves
+    /// agreement on the cases it was given, and the cases it was given are the cases somebody thought
+    /// of, so a kernel that is wrong on the dataset nobody thought of still gets registered. There is
+    /// no arrangement of the type system that closes that, and pretending otherwise would be worse
+    /// than saying it.
+    ///
+    /// What does close it is that nothing about being native gets a batch believed. This one claims
+    /// more rows than it hands over buffers for, `iris-guard` refuses it before an array is built,
+    /// and it is the same refusal a guest that did this would get.
     #[derive(Debug)]
-    struct Liar;
+    struct Deceitful;
 
-    impl Native for Liar {
+    impl Native for Deceitful {
         fn handshake(&self, _hello: &Hello) -> Result<Handshake> {
-            Ok(Handshake {
-                abi_major: ABI_MAJOR,
-                abi_minor: ABI_MINOR,
-                required: CapabilitySet::new().with(Capability::RANDOM_ACCESS),
-                optional: CapabilitySet::new(),
-                decoder_id: "liar".to_owned(),
-            })
+            Ok(fixedwidth_handshake())
         }
 
         fn scan<'a>(
             &'a self,
-            _request: &'a ScanRequest<'a>,
-            _source: &'a mut (dyn RangeSource + Send),
+            hello: &'a Hello,
+            request: &'a ScanRequest<'a>,
+            source: &'a mut (dyn RangeSource + Send),
         ) -> Scanning<'a> {
-            Box::pin(async {
+            Box::pin(async move {
+                let header = support::read(source, 0, 16).await?;
+                let rows = u64::from_le_bytes(header[..8].try_into().expect("eight bytes"));
+                if rows <= CORPUS_ROWS {
+                    return fixedwidth_batches(hello, request, source).await;
+                }
                 Ok(vec![RawBatch {
-                    rows: ROWS,
+                    rows,
                     nodes: (0..COLUMNS)
                         .map(|_| Node {
-                            length: ROWS,
+                            length: rows,
                             null_count: 0,
                         })
                         .collect(),
@@ -356,11 +295,15 @@ fn what_a_native_implementation_emits_is_checked_like_anything_else() {
         }
     }
 
+    // It passes, because every case in the corpus is smaller than the dataset it lies about.
+    let registry = Registry::new().with(prove(Arc::new(Deceitful)));
+
     let bytes = container();
     let runtime = Runtime::new()
         .expect("a runtime starts")
-        .with_native(Registry::new().with_module(decoder_module(), Arc::new(Liar)));
+        .with_native(registry);
     let dataset = runtime.open(&bytes).expect("the container opens");
+    assert!(dataset.decoder_is_native());
 
     let err = dataset
         .scan()
@@ -369,4 +312,11 @@ fn what_a_native_implementation_emits_is_checked_like_anything_else() {
         matches!(err, iris_runtime::Error::Guard(_)),
         "the guard is what refuses this, on both paths: {err}"
     );
+}
+
+#[test]
+fn the_terms_a_kernel_was_proved_under_are_the_terms_it_records() {
+    let kernel = prove(Arc::new(FixedWidth));
+    assert_eq!(kernel.digest(), Digest::of(decoder_module()));
+    assert_eq!(kernel.offered(), [RESIDENT_TERMS, WINDOWED_TERMS]);
 }
