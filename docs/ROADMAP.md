@@ -149,7 +149,7 @@ The second is that the note in the issue, that encoded arrays would be the cheap
 
 ### The window
 
-`iris_source::Window` reserves a span of address space once and slides a view of a file inside it. It lives in `iris-source` rather than in `iris-vm`, even though the milestone issues are labelled for the virtual machine, because it is the only code in the tree that needs `unsafe` and putting it here is what lets every other crate keep `#![forbid(unsafe_code)]`. The crate whose job is "a mapped file" is also the honest home for the code that maps a file.
+`iris_source::Window` reserves a span of address space once and slides a view of a file inside it. It lives in `iris-source` rather than in `iris-vm`, even though the milestone issues are labelled for the virtual machine, because mapping a file is what needs `unsafe` and putting it here is what keeps it out of every other crate. The crate whose job is "a mapped file" is also the honest home for the code that maps a file. It was the only `unsafe` in the tree when it was written and it is one of two now, the other being the single call in `iris-vm` that loads machine code that engine compiled earlier.
 
 The two platforms hold the address range in different ways and that is the whole difficulty. Unix replaces a mapping atomically with `MAP_FIXED`, so a view is removed by mapping `PROT_NONE` over it rather than by unmapping it, because an unmapped range is a hole another thread's allocation can land in. Windows has no atomic replace and uses placeholders instead: reserve the range, split a piece off it, put a view in the piece, take the view out and leave the piece, rejoin the pieces. Five flags in a fixed order, and getting the order wrong does not fail, it leaks the reservation or leaves a split that the next map trips over a thousand cycles later.
 
@@ -215,7 +215,13 @@ What it costs today is one module compilation per partition, because opening a c
 
 The result is in and it says something different from either branch of that. The gap is not x86 only, and it is not vector width either. The guest executes about 1.7 times the host's instructions on both architectures and it does not use the 128 bit vectors it already has, so a native kernel set exists to remove bounds checks and memory base reloads rather than to reach wider vectors. That is still worth having and it is a smaller claim than the one this milestone was ordered around. `docs/VECTORISATION.md` has the numbers.
 
-**Gate.** Registering a native kernel without a passing byte identical differential run is a build failure, not a warning. Keying is on the content hash, so a decoder with a different hash claiming the same name gets the WebAssembly path. Substitution is logged with both digests on every scan. The ahead of time compilation cache is keyed on the decoder digest, the Wasmtime version, the target triple and the configuration hash, with cold start numbers published.
+### What the compilation cache cost
+
+The mitigation written down for M3 was that `iris-vm` is the only crate that touches Wasmtime and the rest of the tree does not know it exists. That is what decided where the compilation cache went. Loading machine code back in is unsafe and cannot be anything else, because the bytes are about to be executed, so there is no version of the call that validates its way out of the problem. `iris-runtime` cannot hold it and keep `#![forbid(unsafe_code)]`, and a crate of its own would have to take a `wasmtime::Module` across a public boundary, which is the mitigation gone.
+
+So it lives in `iris-vm`, which moved from `forbid(unsafe_code)` to `deny` with one allowed call. That is a real weakening and the crate's own documentation says which claim it weakens: not the one about `unsafe impl Send`, which `ci/discipline.py` enforces and which is unchanged, but the blanket statement that no unsafe call can appear there. What replaced it is that the call is private, so no host can reach it, and that every other module still cannot use it without changing an attribute somebody will see in review.
+
+**Gate.** Registering a native kernel without a passing byte identical differential run is a build failure, not a warning. Keying is on the content hash, so a decoder with a different hash claiming the same name gets the WebAssembly path. Substitution is logged with both digests on every scan. The ahead of time compilation cache is keyed on the decoder digest, the Wasmtime version, the target triple and the configuration hash, with cold start numbers published in `docs/COLD_START.md`.
 
 ## M8, integrations and the adoption path
 

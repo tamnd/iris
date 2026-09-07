@@ -70,18 +70,56 @@
 //! may poll one, put it down, and poll it again from another thread, which is what a work stealing
 //! executor does to every task it is handed.
 //!
-//! Nothing here asserts that. `unsafe_code` is forbidden in this crate, so there is no
-//! `unsafe impl Send` to be written, and nothing in the tree asks which thread it is running on.
-//! The property holds because of what these types contain, the compilation of this crate depends on
-//! it through the assertions at the bottom of this file, and `ci/discipline.py` refuses the two
-//! shortcuts that would let it stop being true without anybody noticing.
+//! Nothing here asserts that. There is no `unsafe impl Send` to be written, and nothing in the tree
+//! asks which thread it is running on. The property holds because of what these types contain, the
+//! compilation of this crate depends on it through the assertions at the bottom of this file, and
+//! `ci/discipline.py` refuses the two shortcuts that would let it stop being true without anybody
+//! noticing.
 //!
 //! `tests/stealing.rs` is the same claim made the other way round: a scan that suspends is resumed
 //! on a thread that has never touched it, once per suspension, and the guest still adds up.
+//!
+//! # Compiling once and keeping it
+//!
+//! Compiling is by a wide margin the most expensive thing here, and what it produces is the same
+//! every time for the same module on the same engine. [`Vm::with_compilation_cache`] names a
+//! directory to keep it in, so the second process to open a decoder reads the machine code instead
+//! of producing it again. It is off until somebody names a directory, `docs/COLD_START.md` has what
+//! it is worth, and every way it can fail ends in an ordinary compile, because a cache that can fail
+//! an open is worse than no cache.
+//!
+//! The key is the digest of the module together with [`Vm::fingerprint`], which is Wasmtime's own
+//! account of everything about this engine that decides what compiling produces. An entry from a
+//! different Wasmtime, a different target or a different configuration is therefore never found,
+//! rather than being found and rejected. That distinction is the point: an artefact is machine code,
+//! and one loaded by an engine that would have compiled it differently is not a stale answer.
+//!
+//! # The one unsafe call, and why it is not the one that used to be forbidden
+//!
+//! This crate denied `unsafe_code` outright until it grew that cache. Loading machine code back in
+//! is unsafe in Wasmtime and cannot be anything else: the bytes are about to be executed, so there
+//! is no version of the call that validates its way out of the problem. So the choice was between an
+//! unsafe call and not having a compilation cache.
+//!
+//! `deny` rather than `forbid`, with the places that need it allowing it and carrying a safety
+//! comment. That is a real weakening and it is worth being plain about which claim it weakens. It
+//! does not weaken the one above: the reason nobody can write `unsafe impl Send` here is
+//! `ci/discipline.py`, which is a different check and is unchanged. What it weakens is the blanket
+//! statement that no unsafe call can appear in this crate.
+//!
+//! What replaced it is narrower than the statement it lost. One Wasmtime function is called unsafely
+//! and it is `Module::deserialize`. It is called from one private wrapper, whose whole documentation
+//! is what a caller is promising, and that wrapper is called from the two places in the cache that
+//! have anything to promise. None of them is reachable from outside the crate, so there is no unsafe
+//! function in this crate's API at all, and nothing outside decides what bytes are handed to it: the
+//! key is computed here from the module about to be compiled, the file is written here, and the only
+//! thing ever read back is something this engine wrote. Every other module still cannot reach for
+//! `unsafe` without adding an attribute somebody will see in review.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod batch;
+mod cache;
 mod error;
 mod instance;
 mod module;

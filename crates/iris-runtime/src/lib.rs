@@ -111,6 +111,26 @@
 //! checks that this is actually happening, and [`Runtime::with_decoder_cache_bytes`] is how it says
 //! how much of it to keep.
 //!
+//! # Keeping it across a restart
+//!
+//! The pool above holds nothing once the process ends, and compiling is most of what an open costs,
+//! so a host that comes up, answers a query and goes away pays for the compiler every time.
+//! [`Runtime::with_compilation_cache`] names a directory to keep the compiled form in, and a warm
+//! open is a fraction of a millisecond against tens of milliseconds for one that compiles.
+//! `docs/COLD_START.md` has the measurement.
+//!
+//! The two are layered rather than being alternatives. An open asks the pool first, because a module
+//! already compiled in this process costs nothing at all, and only a miss there reaches the
+//! directory. [`Runtime::compilations_reused`] is how a host checks the second half is working, and
+//! it is the only way it says so: every failure in the cache falls back to compiling, silently and
+//! on purpose, because a cache that can fail an open is worse than no cache.
+//!
+//! It is off until an operator names a directory, and that is the same decision as
+//! [`Runtime::with_decoder_policy`]. An entry is machine code and using one maps it executable, so a
+//! directory another user can write into is a directory that can hand this process anything. What a
+//! dataset cannot do is reach it at all: the key is the digest of the module, which was checked
+//! before any of this, and the identity of the compiler.
+//!
 //! # Waiting without holding a thread
 //!
 //! A source over object storage misses, and a miss is tens of milliseconds. Every scan here comes in

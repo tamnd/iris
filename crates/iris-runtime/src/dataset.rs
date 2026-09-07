@@ -1,6 +1,7 @@
 //! Opening a container and pulling batches out of it.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -204,11 +205,67 @@ impl Runtime {
         self
     }
 
+    /// Keeps compiled decoders in a directory, so that a restart does not compile them again.
+    ///
+    /// The pool above this holds compiled decoders for as long as the process lives, which is what
+    /// stops eight partitions compiling one container eight times. It holds nothing across a
+    /// restart, and compiling is most of what opening a container costs, so a host that comes up,
+    /// answers a query and goes away pays for the compiler every time. This is where that stops.
+    ///
+    /// The two are layered rather than alternatives. An open asks the pool first, because a module
+    /// already compiled in this process costs nothing at all, and only a miss there reaches the
+    /// directory. A miss in both compiles and fills in both.
+    ///
+    /// # What may be in the directory
+    ///
+    /// Only what this host wrote. An entry is machine code and using one maps it executable, so a
+    /// directory another user can write into is a directory that can hand this process anything. This
+    /// is the same decision as [`Runtime::with_decoder_policy`] and it is the operator's for the same
+    /// reason: point it at storage the host owns.
+    ///
+    /// Nothing about a container reaches the directory. The key is the digest of the module, which
+    /// was checked before any of this, and the identity of the compiler, so a dataset cannot name an
+    /// entry, cannot cause one to be written under a key it chose, and cannot be given code compiled
+    /// from something else. An upgrade of iris or of anything under it misses every entry that was
+    /// there rather than loading one.
+    ///
+    /// # What it costs when it fails
+    ///
+    /// Nothing but the compile that would have happened anyway. Every way this can go wrong, from a
+    /// directory that cannot be created to an entry that will not load, ends in an ordinary compile.
+    /// [`Runtime::compilations_reused`] is how a host finds out that it is not working, because
+    /// nothing else will say so.
+    #[must_use]
+    pub fn with_compilation_cache(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.vm = self.vm.with_compilation_cache(dir);
+        self
+    }
+
+    /// How many decoders were loaded out of the compilation cache rather than compiled.
+    ///
+    /// Zero without [`Runtime::with_compilation_cache`], and zero on the first run against an empty
+    /// directory. A host where this stays zero across restarts has a directory it cannot read or
+    /// cannot write, which is worth knowing and is silent everywhere else.
+    #[must_use]
+    pub fn compilations_reused(&self) -> u64 {
+        self.vm.compilations_reused()
+    }
+
+    /// How many compiled decoders were written into the compilation cache.
+    #[must_use]
+    pub fn compilations_stored(&self) -> u64 {
+        self.vm.compilations_stored()
+    }
+
     /// How many decoders this runtime has compiled since the pool it holds was made.
     ///
     /// The number that says whether sharing is working. Eight partitions opening one container move
     /// it by one, and a host that sees it climbing with the query count is a host whose runtime is
     /// being rebuilt rather than shared.
+    ///
+    /// A decoder loaded out of a compilation cache counts here, because from the pool's side it is a
+    /// decoder that was not held and had to be got from somewhere. What it cost is the difference
+    /// between this and [`Runtime::compilations_reused`].
     #[must_use]
     pub fn decoders_compiled(&self) -> u64 {
         self.decoders.builds()

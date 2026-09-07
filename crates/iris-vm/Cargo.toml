@@ -14,6 +14,7 @@ readme = "README.md"
 
 [dependencies]
 iris-abi.workspace = true
+iris-format.workspace = true
 iris-source.workspace = true
 thiserror.workspace = true
 wasmtime.workspace = true
@@ -23,6 +24,9 @@ wasmtime.workspace = true
 # so that a ratio between the two sides is two builds of one decoder rather than two
 # decoders. The crate is not published and exists only for that harness.
 m5-decode.workspace = true
+# The compilation cache writes files, so testing it means having somewhere to write them
+# that goes away afterwards.
+tempfile.workspace = true
 # The M0 probe builds its guest modules from WebAssembly text, so the two loops it
 # compares differ only in the one instruction that is being measured. Nothing in the
 # library reads text, so this stays a development dependency.
