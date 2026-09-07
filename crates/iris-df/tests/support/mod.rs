@@ -10,6 +10,11 @@
 //! the example and linking it again even when nothing needed compiling. The lock here is held across
 //! the build and the reads together, which is the only arrangement where what was built is still
 //! there to be read.
+//!
+//! Every test file here gets its own copy of this module and no one file uses all of it, which is
+//! what the allow below is for. Splitting it so that each file sees only what it calls would mean
+//! two ways to run a nested cargo, which is the thing worth avoiding.
+#![allow(dead_code)]
 
 use std::fs::File;
 use std::io::{BufWriter, Write as _};
