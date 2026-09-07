@@ -36,6 +36,12 @@ use support::{builder, column_values};
 /// Small, because none of this is about how long a scan takes.
 const ROWS: u64 = 512;
 
+/// [`ROWS`] as a length, because a column's values come back as a slice and a container counts its
+/// rows in a width that does not depend on the host.
+fn expected_rows() -> usize {
+    usize::try_from(ROWS).expect("a few hundred rows fit in a usize on anything this runs on")
+}
+
 /// More than one, so a decoder that asks for a single range is not what is being measured.
 const COLUMNS: u64 = 2;
 
@@ -245,7 +251,8 @@ fn thirty_two_scans_all_waiting_at_once_do_not_need_thirty_two_workers() {
     assert_eq!(rows.len(), SCANS);
     for read in rows {
         assert_eq!(
-            read, ROWS as usize,
+            read,
+            expected_rows(),
             "a scan that gave its worker away still read the whole table"
         );
     }
@@ -281,7 +288,7 @@ fn a_host_that_agreed_to_wait_still_gets_its_rows_from_a_source_that_stalls() {
             column_values(&batches, 0).len()
         },
     );
-    assert_eq!(read, ROWS as usize);
+    assert_eq!(read, expected_rows());
 
     // The synchronous path hands the source a waker that does nothing, because the thread calling it
     // is the scheduler and will come back on its own. The source is entitled to take that waker and

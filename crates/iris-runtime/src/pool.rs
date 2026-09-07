@@ -1,7 +1,7 @@
 //! A bounded store of things that were expensive to build, shared by every scan.
 //!
 //! Compiling a decoder is the most expensive thing this crate does, and the arrangement a query
-//! engine puts it in is the worst one for it. A DataFusion query over an iris table opens the
+//! engine puts it in is the worst one for it. A `DataFusion` query over an iris table opens the
 //! container once per output partition, and each open compiles the same decoder again, so a scan
 //! split four ways pays for the compiler four times to run four copies of identical code. The
 //! module is identified by the hash of its bytes and the hash was checked before anything compiled
@@ -148,13 +148,13 @@ impl<K: Clone + Eq, V: Clone> Pool<K, V> {
             pool: self,
             key: key.clone(),
         };
-        let built = build();
-        if let Ok(value) = &built {
+        let made = build();
+        if let Ok(value) = &made {
             let mut state = self.lock();
             self.admit(&mut state, key.clone(), value.clone(), weight);
         }
         drop(claim);
-        built
+        made
     }
 
     /// How many builds this pool has started since it was made.
@@ -278,10 +278,17 @@ mod tests {
         Pool::new(budget)
     }
 
-    /// Builds a value and says so, so a test can tell a hit from a miss.
-    fn build(calls: &AtomicU64, value: &str) -> Result<String, ()> {
-        calls.fetch_add(1, Ordering::Relaxed);
-        Ok(value.to_owned())
+    /// Hands back a build that produces `value` and counts itself, so a test can tell a hit from a
+    /// miss.
+    ///
+    /// It returns the closure rather than being it because the counting is the point: the pool only
+    /// runs the closure on a miss, so a helper that did the work itself would count the asks rather
+    /// than the builds and every test below would be measuring the wrong thing.
+    fn build<'a>(calls: &'a AtomicU64, value: &'a str) -> impl FnOnce() -> Result<String, ()> + 'a {
+        move || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(value.to_owned())
+        }
     }
 
     #[test]
@@ -290,11 +297,11 @@ mod tests {
         let calls = AtomicU64::new(0);
 
         assert_eq!(
-            pool.get_or_build(&1, 8, || build(&calls, "one")),
+            pool.get_or_build(&1, 8, build(&calls, "one")),
             Ok("one".to_owned())
         );
         assert_eq!(
-            pool.get_or_build(&1, 8, || build(&calls, "one")),
+            pool.get_or_build(&1, 8, build(&calls, "one")),
             Ok("one".to_owned())
         );
 
@@ -309,18 +316,18 @@ mod tests {
         let calls = AtomicU64::new(0);
 
         for key in 1..=2 {
-            let _ = pool.get_or_build(&key, 10, || build(&calls, "held"));
+            let _ = pool.get_or_build(&key, 10, build(&calls, "held"));
         }
         // Asking for the first again makes the second the oldest, so the third replaces it rather
         // than replacing the one that has just been used.
-        let _ = pool.get_or_build(&1, 10, || build(&calls, "held"));
-        let _ = pool.get_or_build(&3, 10, || build(&calls, "held"));
+        let _ = pool.get_or_build(&1, 10, build(&calls, "held"));
+        let _ = pool.get_or_build(&3, 10, build(&calls, "held"));
 
         assert_eq!(pool.entries(), 2);
         assert_eq!(pool.held(), 20);
         assert_eq!(calls.load(Ordering::Relaxed), 3, "nothing was rebuilt yet");
 
-        let _ = pool.get_or_build(&2, 10, || build(&calls, "held"));
+        let _ = pool.get_or_build(&2, 10, build(&calls, "held"));
         assert_eq!(
             calls.load(Ordering::Relaxed),
             4,
@@ -333,9 +340,9 @@ mod tests {
         let pool = pool(16);
         let calls = AtomicU64::new(0);
 
-        let _ = pool.get_or_build(&1, 8, || build(&calls, "small"));
+        let _ = pool.get_or_build(&1, 8, build(&calls, "small"));
         assert_eq!(
-            pool.get_or_build(&2, 64, || build(&calls, "large")),
+            pool.get_or_build(&2, 64, build(&calls, "large")),
             Ok("large".to_owned())
         );
 
@@ -355,7 +362,7 @@ mod tests {
 
         let calls = AtomicU64::new(0);
         assert_eq!(
-            pool.get_or_build(&1, 8, || build(&calls, "one")),
+            pool.get_or_build(&1, 8, build(&calls, "one")),
             Ok("one".to_owned()),
             "the next caller tries again rather than being handed the failure"
         );
@@ -377,7 +384,7 @@ mod tests {
 
         let calls = AtomicU64::new(0);
         assert_eq!(
-            pool.get_or_build(&1, 8, || build(&calls, "one")),
+            pool.get_or_build(&1, 8, build(&calls, "one")),
             Ok("one".to_owned()),
             "a key whose build panicked is not a key nobody can ever build again"
         );
