@@ -37,6 +37,7 @@ CRATES=(
   iris-decoder
   iris-vm
   iris-runtime
+  iris-df
   irisdb
 )
 
