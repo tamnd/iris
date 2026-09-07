@@ -111,6 +111,26 @@
 //! checks that this is actually happening, and [`Runtime::with_decoder_cache_bytes`] is how it says
 //! how much of it to keep.
 //!
+//! # Waiting without holding a thread
+//!
+//! A source over object storage misses, and a miss is tens of milliseconds. Every scan here comes in
+//! two forms because of that. [`Windowed::scan`] and the rest of the synchronous set block the
+//! calling thread until the rows are there, which is what a host wants when the thread it called on
+//! is its own. [`Windowed::scan_async`] and the rest of the asynchronous set are the same scan handed
+//! to an executor, and a decoder waiting on bytes inside one of those gives the worker back rather
+//! than parking on it.
+//!
+//! There is one implementation underneath and the synchronous entry points drive it, so the two sets
+//! cannot drift apart in what they read or in what they refuse. What differs is only who is holding
+//! the thread while the bytes are in flight.
+//!
+//! Giving the worker back is worth something only if the task is woken when the answer lands, and
+//! that is the source's part of the arrangement. `iris_source::RangeSource::wake_when_ready` is how a
+//! source says it will do that, `iris_source::ObjectSource` implements it, and a source that does not
+//! gets asked again instead. Either way the worker is free in the meantime, which is the property
+//! that matters on a pool of a fixed size: a query with more outstanding round trips than workers
+//! still makes progress on all of them.
+//!
 //! # What it does not do yet
 //!
 //! Nothing here reads ahead on its own. A source handed to [`Runtime::open_windowed`] is used

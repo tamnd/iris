@@ -18,6 +18,14 @@
 //!
 //! It also does not check thread safety, because [`RangeSource`] does not promise any. A source is
 //! driven by whichever thread owns it.
+//!
+//! [`RangeSource::wake_when_ready`] is not checked either, and that one is a gap rather than a
+//! decision about scope. Checking it means asking for a range that goes pending, leaving a waker,
+//! and waiting for it, and waiting is the one thing a suite that has to run on a caller's own thread
+//! cannot do without risking a hang on whatever runtime that thread belongs to. The property is
+//! covered instead where the source is driven by a real executor, in the runtime's yielding tests.
+//! A source that gets it wrong still answers every range correctly and spins, so nothing here would
+//! notice.
 
 use crate::source::{Fetch, RangeSource, SourceError, read_blocking};
 

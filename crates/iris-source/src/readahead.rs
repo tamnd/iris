@@ -56,6 +56,8 @@
 //! reading ahead of a request that is already the size of a block, and copying one would be the
 //! largest cost here for the least reason.
 
+use std::task::Waker;
+
 use crate::source::{Fetch, RangeSource, SourceError, Traffic, bounds};
 
 /// A source that fetches in blocks, so that adjacent requests become one request.
@@ -249,6 +251,15 @@ impl<S: RangeSource> RangeSource for Readahead<S> {
                     })
             }
         }
+    }
+
+    fn wake_when_ready(&mut self, waker: &Waker) -> bool {
+        // Passed straight down for the same reason as the traffic counters. This adapter never has
+        // a fetch of its own outstanding: a pending answer from here is a pending answer from the
+        // source underneath, so the thing that knows when to wake anyone is down there. Not
+        // forwarding it would leave every source behind a readahead spinning, which is the shape of
+        // bug that hides for a long time because the answers are all still correct.
+        self.inner.wake_when_ready(waker)
     }
 
     fn traffic(&self) -> Traffic {

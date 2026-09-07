@@ -21,6 +21,19 @@
 //! A host that genuinely does not mind blocking can call [`read_blocking`] and get the old shape
 //! back in one line. That is a choice the host makes, which is the point.
 //!
+//! # Coming back at the right moment
+//!
+//! Asking again in a tight loop is correct and wasteful. A host on an executor wants to put the task
+//! down and be woken when there is something new to see, which is what
+//! [`RangeSource::wake_when_ready`] is for. It takes a waker, says whether it will use it, and a
+//! caller that gets `false` back is being told to come and ask again rather than to wait.
+//!
+//! Saying `false` is always allowed and is what the two sources that never go pending say, because
+//! there is nothing for them to wake anyone about. Saying `true` is a promise to wake that waker
+//! once, and the reason it is a return value rather than a separate question is the race in between:
+//! by the time a source is asked to remember a waker the answer may already have arrived, and
+//! `false` is how it says so without having to hand the bytes over from the wrong method.
+//!
 //! # What an implementation has to promise
 //!
 //! Five things, and the conformance suite checks all of them.
@@ -48,7 +61,7 @@
 //!
 //! Nothing here says a source has to remember more than one range. A windowed file keeps whatever
 //! its current view covers, an object source keeps its last block, and a memory source keeps
-//! everything. All three satisfy the four promises above, which is what makes them substitutable.
+//! everything. All three satisfy the five promises above, which is what makes them substitutable.
 //!
 //! # Writing a fourth
 //!
@@ -56,8 +69,13 @@
 //! [`traffic`](RangeSource::traffic), override [`largest`](RangeSource::largest) if a single call
 //! cannot serve an arbitrarily long range, and run it through [`crate::conformance`] with the
 //! `conformance` feature on. If the suite passes, the rest of iris will drive it.
+//!
+//! Override [`wake_when_ready`](RangeSource::wake_when_ready) as well if the source can return
+//! [`Fetch::Pending`]. Leaving it alone is correct and costs a host on an executor a poll it did not
+//! need, which is why it is a default rather than a required method.
 
 use std::io;
+use std::task::Waker;
 
 /// What a source says when it is asked for a range.
 ///
@@ -228,6 +246,26 @@ pub trait RangeSource {
     /// [`SourceError::OutOfBounds`] if the range leaves the source, [`SourceError::TooLarge`] if no
     /// single call could cover it, and an implementation specific error if the fetch itself failed.
     fn range(&mut self, at: u64, len: usize) -> Result<Fetch<'_>, SourceError>;
+
+    /// Asks to be woken when the outstanding fetch lands, and says whether it will be.
+    ///
+    /// Called after [`RangeSource::range`] answered [`Fetch::Pending`], by a caller that would
+    /// rather put the work down than ask again straight away. Returning `true` is a promise to wake
+    /// this waker once, and returning `false` says there is nothing to wait for and the caller
+    /// should come back on its own.
+    ///
+    /// The default is `false`, which is the honest answer from a source that never goes pending and
+    /// the safe answer from one that has not thought about it. A caller that gets it spins, which is
+    /// what every caller did before this method existed.
+    ///
+    /// Note the shape of the race this avoids. A source that had already been woken by the time it
+    /// was asked to remember a waker returns `false`, so the answer that arrived while the caller
+    /// was deciding to wait is picked up by the next ask rather than lost behind a waker nobody will
+    /// ever fire.
+    fn wake_when_ready(&mut self, waker: &Waker) -> bool {
+        let _ = waker;
+        false
+    }
 
     /// What this source has done since it was opened.
     ///

@@ -11,7 +11,7 @@ use wasmtime::{
 use crate::batch::RawBatch;
 use crate::error::{Error, Result};
 use crate::module::Program;
-use crate::run::{Running, Yield, settled};
+use crate::run::{Park, Running, settled};
 
 /// What the host keeps alongside a running module.
 ///
@@ -291,6 +291,11 @@ pub struct Handshake {
 /// parked mid instruction with its stack intact and the host thread goes back to whoever polled the
 /// call. Nothing is replayed when it resumes, so a scan that misses on every one of its ranges costs
 /// one suspension per range rather than one restart per range.
+///
+/// The thread is given back on every miss whatever the host is. What a source that can say when its
+/// bytes will land buys on top of that is the task sleeping rather than being handed straight back,
+/// which is the difference between an executor with something else to do and an executor with
+/// something else to do and one fewer core to do it on.
 fn require_range(
     mut caller: Caller<'_, State>,
     (offset, len, dst): (u64, u32, u32),
@@ -324,20 +329,25 @@ async fn serve(
     // The borrow the loop takes cannot be seen to end by a borrow checker that has not been told
     // the iteration returned, and the second call is a comparison against a range that was just
     // made ready. `iris-source` does the same thing in `read_blocking` for the same reason.
+    //
+    // Readiness comes out of the match as a bool rather than the loop breaking out of it, because
+    // the pending arm goes on to hand the same source to `Park`, and a borrow that is still alive
+    // across the arms of the match that produced it cannot be taken again.
     loop {
-        match source.range(offset, want) {
-            Ok(fetch) if fetch.is_ready() => break,
-            Ok(_) => {
-                // The budget goes back before the guest is parked. What it is there to catch is a
-                // decoder that will not return, and a decoder waiting on a range is not running at
-                // all, so charging it for the wait would turn a slow object store into a decoder
-                // that looks hostile.
-                let ticks = caller.data().ticks;
-                caller.as_context_mut().set_epoch_deadline(ticks);
-                Yield::once().await;
-            }
+        let ready = match source.range(offset, want) {
+            Ok(fetch) => fetch.is_ready(),
             Err(err) => return refuse(caller, &err),
+        };
+        if ready {
+            break;
         }
+
+        // The budget goes back before the guest is parked. What it is there to catch is a decoder
+        // that will not return, and a decoder waiting on a range is not running at all, so charging
+        // it for the wait would turn a slow object store into a decoder that looks hostile.
+        let ticks = caller.data().ticks;
+        caller.as_context_mut().set_epoch_deadline(ticks);
+        Park::once(source).await;
     }
 
     match source.range(offset, want) {
