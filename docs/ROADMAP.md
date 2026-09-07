@@ -191,6 +191,14 @@ A global memory pool, genuinely `Send` jobs, `loom` coverage, and `iris-df`.
 
 **Gate.** A decode job is `Send` with no `unsafe impl` and no thread identity assertion anywhere in the tree, so the class of bug is structurally impossible rather than fixed. A DataFusion query over an `iris` table survives Tokio work stealing under a thousand iteration stress run. `loom` passes on the pool handoff and eviction paths, enabled by a CI configuration flag and never by a cargo feature. An asynchronous `require_range` miss yields the worker thread instead of parking it.
 
+### The job type was one word short
+
+The interesting part of the first box was finding out how much of it was already true. Nothing in the tree ever had a thread local pool or a thread identity assertion to remove, because the host was built the other way round from the start: a decoder is instantiated per scan, the source it reads through is `Box<dyn RangeSource + Send>`, and `iris-vm` forbids unsafe code outright so it could not have declared its own thread safety even if somebody had wanted to. Every type a host holds was `Send` on the day the milestone opened.
+
+Every type except the one the gate is actually about. A decode job is a call that has started and has not finished, which is `Running`, and `Running` is a boxed future that was written without `+ Send`. So a job could be moved between threads in principle and not in practice, and the failure was a compiler error at whatever call site first tried, rather than anything unsound. Adding the word and finding that the whole tree still compiles is the evidence that the underlying property held: a future is `Send` when everything it holds across a suspension is, and this one holds a Wasmtime store, a guest stack and a source.
+
+What is worth having is that it cannot quietly stop being true. The types are asserted `Send` in the libraries themselves rather than in a test, so the check runs for anybody building the crate and not only for whoever runs the suite. `ci/discipline.py` refuses an `unsafe impl Send`, a thread identity question and a thread local on the host side, with the three OS mapping types in `iris-source` named one at a time as the exceptions. `iris-vm/tests/stealing.rs` is the same claim from the other end: a scan that suspends two hundred and fifty six times is resumed on a thread spawned for that resumption every time, and the guest's running total, which lives in a WebAssembly local and nowhere else, still comes out right.
+
 ## M7, the native fast path
 
 `iris-native`, keyed by content hash, with its differential harness. This was deferred to here even though the WebAssembly vector width ceiling appeared to make it required infrastructure, for one reason: M5's arm64 result might have shown the gap was x86 only, which would have changed both the priority and the kernel set. Building it before knowing that is building the wrong thing quickly.

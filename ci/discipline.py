@@ -19,6 +19,10 @@ What it checks:
   5. No hostname or address from the runner fleet has leaked into a committed
      file. Machines are named by hardware in public, because a hostname tells a
      reader nothing they can compare against.
+  6. Nothing on the host side claims to be thread safe by hand or asks which
+     thread it is on. A decode job is Send because of what it holds, and the
+     two ways that stops being true without breaking anything are an unsafe
+     impl and a thread local.
 """
 
 from __future__ import annotations
@@ -35,6 +39,25 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # pinned release toolchain, which is the whole point of the promise.
 NIGHTLY_ALLOWED = {"nightly.yml", "soak.yml"}
 NIGHTLY_ALLOWED_JOBS = {"miri"}
+
+# The only types in the tree that are allowed to declare their own thread
+# safety, named one at a time so that a new one is a deliberate edit here rather
+# than a line that slips into a file already on a list. Each of these owns an
+# address range that came back from an operating system call, holds the pointer
+# to it from construction until drop, and shares it with nothing. There is no
+# way to express that to the compiler, and rewriting the address as an integer
+# to make the same promise implicitly would be the same promise written where
+# nobody can read it.
+UNSAFE_SEND_ALLOWED = {
+    ("crates/iris-source/src/sys/unix.rs", "Reservation"),
+    ("crates/iris-source/src/sys/windows.rs", "Backing"),
+    ("crates/iris-source/src/sys/windows.rs", "Reservation"),
+}
+
+# Crates that are compiled to wasm32 and run inside a guest, where there is one
+# thread because the specification says so. A thread local in one of these is a
+# static with a longer name.
+GUEST_CRATES = {"iris-decoder", "m0-scan", "m5-decode"}
 
 failures: list[str] = []
 
@@ -169,6 +192,42 @@ def check_no_machine_identity() -> None:
                     fail(f"{path.relative_to(ROOT)}:{line_no}: looks like {what}: {hit.group()}")
 
 
+def check_thread_safety_is_structural() -> None:
+    """A decode job is Send because of what it holds, not because it says so.
+
+    The prior art in this area declares `unsafe impl Send` on its job type and
+    then checks at run time that it is on the thread it started on. That is
+    correct under a harness that pins work to threads and unsound under any
+    executor that moves a task after it parks, which is what DataFusion and
+    Tokio both do. Removing the assertion is not the fix either, because then
+    the unsafe impl is a promise nothing keeps.
+
+    So this looks for the three shapes that let the property quietly stop being
+    true: a type that asserts its own thread safety, code that asks which thread
+    it is on, and a thread local, which is state that a job carries without
+    owning and therefore loses the moment it moves.
+    """
+    unsafe_impl = re.compile(r"^\s*unsafe impl(?:<[^>]*>)?\s+(Send|Sync)\s+for\s+([A-Za-z0-9_]+)")
+    identity = re.compile(r"\bthread::current\b|\bThreadId\b")
+    local = re.compile(r"\bthread_local!")
+    for path in sorted((ROOT / "crates").rglob("*.rs")):
+        rel = path.relative_to(ROOT)
+        if "target" in rel.parts:
+            continue
+        crate = rel.parts[1]
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            matched = unsafe_impl.match(line)
+            if matched and (rel.as_posix(), matched.group(2)) not in UNSAFE_SEND_ALLOWED:
+                fail(
+                    f"{rel}:{line_no}: {matched.group(2)} declares its own {matched.group(1)}, "
+                    f"which is a promise the compiler cannot check"
+                )
+            if identity.search(line):
+                fail(f"{rel}:{line_no}: asks which thread it is on, which a Send job may not do")
+            if local.search(line) and crate not in GUEST_CRATES:
+                fail(f"{rel}:{line_no}: a thread local, which a job that moves between threads loses")
+
+
 def main() -> int:
     rust_version = workspace_rust_version()
     check_toolchain(rust_version)
@@ -176,6 +235,7 @@ def main() -> int:
     check_no_patched_dependencies()
     check_no_stray_nightly()
     check_no_machine_identity()
+    check_thread_safety_is_structural()
     if failures:
         print("Discipline checks failed:\n", file=sys.stderr)
         for failure in failures:

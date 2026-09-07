@@ -56,7 +56,7 @@ pub enum Progress<T> {
 /// That is not a limitation being worked around: a decoder has one stack and one set of buffers, and
 /// two scans interleaved on them would be two scans reading each other's memory.
 pub struct Running<'a, T> {
-    call: Pin<Box<dyn Future<Output = Result<T>> + 'a>>,
+    call: Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
 }
 
 impl<T> core::fmt::Debug for Running<'_, T> {
@@ -66,7 +66,7 @@ impl<T> core::fmt::Debug for Running<'_, T> {
 }
 
 impl<'a, T> Running<'a, T> {
-    pub(crate) fn new(call: impl Future<Output = Result<T>> + 'a) -> Self {
+    pub(crate) fn new(call: impl Future<Output = Result<T>> + Send + 'a) -> Self {
         Self {
             call: Box::pin(call),
         }

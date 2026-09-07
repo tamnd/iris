@@ -62,6 +62,22 @@
 //! the `emit` call that produced it. That is not caution, it is correctness: a decoder is allowed to
 //! reuse its buffers between batches, so the bytes at an offset are only certainly the batch's bytes
 //! during that call. Taking them later would be reading whatever the next batch happened to write.
+//!
+//! # Putting a job down and picking it up somewhere else
+//!
+//! Every type here is `Send`, and the one that matters is [`Running`], because a [`Running`] is a
+//! decode job: a call that has started, has not finished, and is sitting on a guest stack. A host
+//! may poll one, put it down, and poll it again from another thread, which is what a work stealing
+//! executor does to every task it is handed.
+//!
+//! Nothing here asserts that. `unsafe_code` is forbidden in this crate, so there is no
+//! `unsafe impl Send` to be written, and nothing in the tree asks which thread it is running on.
+//! The property holds because of what these types contain, the compilation of this crate depends on
+//! it through the assertions at the bottom of this file, and `ci/discipline.py` refuses the two
+//! shortcuts that would let it stop being true without anybody noticing.
+//!
+//! `tests/stealing.rs` is the same claim made the other way round: a scan that suspends is resumed
+//! on a thread that has never touched it, once per suspension, and the guest still adds up.
 
 #![forbid(unsafe_code)]
 
@@ -79,3 +95,24 @@ pub use run::{Progress, Running};
 
 /// The version of this crate, as reported by build metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// A decode job may be moved between threads, and this is where the build finds out.
+//
+// A test would find it out too, and later. These are compile time assertions in the library itself,
+// so a change that makes a job stop being `Send` fails the build of the crate that made it rather
+// than the test run of a crate downstream, and it fails for anybody building this crate rather than
+// only for whoever runs the tests.
+//
+// `Running` is the interesting one and the rest are the types a host holds around it. A future that
+// is not `Send` is a task no work stealing executor will accept, and the way that usually happens is
+// that something not `Send` was held across an await inside the job rather than that anybody changed
+// a signature.
+const _: () = {
+    const fn is_send<T: Send>() {}
+    is_send::<Vm>();
+    is_send::<Program>();
+    is_send::<Decoder>();
+    is_send::<Handshake>();
+    is_send::<RawBatch>();
+    is_send::<Running<'static, Vec<RawBatch>>>();
+};

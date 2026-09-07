@@ -187,3 +187,16 @@ pub use iris_source::Traffic;
 
 /// The version of this crate, as reported by build metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// An open dataset may be moved between threads, and this is where the build finds out.
+//
+// The same reasoning as the block at the bottom of `iris-vm`, one level up. What a query engine
+// holds is one of these rather than a `Decoder`, and a table provider that is not `Send` is a table
+// no engine with a work stealing scheduler can read from. Both doors in are here because they hold
+// different things: one owns a copy of the container and the other owns a source it reads through.
+const _: () = {
+    const fn is_send<T: Send>() {}
+    is_send::<Runtime>();
+    is_send::<Dataset<'static>>();
+    is_send::<Windowed>();
+};
