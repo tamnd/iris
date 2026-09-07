@@ -20,6 +20,10 @@ tracing.workspace = true
 wasmtime.workspace = true
 
 [dev-dependencies]
+# The M5 vectorisation probe links the same decode kernel it runs inside the sandbox,
+# so that a ratio between the two sides is two builds of one decoder rather than two
+# decoders. The crate is not published and exists only for that harness.
+m5-decode.workspace = true
 # The M0 probe builds its guest modules from WebAssembly text, so the two loops it
 # compares differ only in the one instruction that is being measured. Nothing in the
 # library reads text, so this stays a development dependency.
@@ -27,6 +31,9 @@ wasmtime = { workspace = true, features = ["wat"] }
 
 [[example]]
 name = "m0_probe"
+
+[[example]]
+name = "m5_vector"
 
 [lints]
 workspace = true

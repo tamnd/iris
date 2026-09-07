@@ -280,6 +280,86 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+  # The M5 vectorisation comparison, which is the probe behind issue #32.
+  #
+  # The hosted matrix in the M5 probe workflow is what makes this an architecture result, because the
+  # fleet is entirely x86-64 and instruction counts from a simulator are comparable across machines
+  # in a way durations are not. What this job adds is the half a simulator cannot give: durations
+  # from a machine with no neighbour, and instructions per cycle from a real performance monitoring
+  # unit. A guest that runs the same instructions as the host and takes longer is a different finding
+  # from a guest that runs more of them, and only a counter can tell those apart.
+  #
+  # Two tunings, in two target directories. RUSTFLAGS invalidates a target directory, so sharing one
+  # would mean rebuilding the world on the second pass and then again on the next run.
+  vectorisation:
+    name: Vectorisation on ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: epyc-8c-24gb
+            runner: [self-hosted, linux, x64, epyc-8c-24gb]
+            jobs: 6
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+
+      # Says what it could read before anything reads it, so a run that produced no counters says why
+      # in its own log rather than in a reader's guess.
+      - name: What this machine will let a process count
+        shell: bash
+        run: |
+          cat /proc/sys/kernel/perf_event_paranoid || true
+          perf stat -e instructions,cycles -x, true || true
+
+      - name: Run the probe at both tunings
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+        run: |
+          set -euo pipefail
+          for tuning in baseline native; do
+            if [ "$tuning" = native ]; then
+              export RUSTFLAGS="-C target-cpu=native"
+            else
+              unset RUSTFLAGS
+            fi
+            export CARGO_TARGET_DIR="$PWD/target-$tuning"
+            cargo build --release --locked -p iris-vm --example m5_vector
+            "$CARGO_TARGET_DIR/release/examples/m5_vector" --repeats 400
+            "$CARGO_TARGET_DIR/release/examples/m5_vector" --repeats 400 --json \
+              > "vector-${{ matrix.name }}-$tuning.json"
+            for case in int-bp dbl-pseudodecimal str-fsst; do
+              python3 ci/vector_counters.py --cases "$case" \
+                --json-out "counters-${{ matrix.name }}-$tuning-$case.json" || true
+            done
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vector-${{ matrix.name }}
+          path: |
+            vector-${{ matrix.name }}-*.json
+            counters-${{ matrix.name }}-*.json
+          retention-days: 30
+          if-no-files-found: error
+
   # The M5 remote scan comparison, which is the probe behind issue #31.
   #
   # A different machine from the two probes above, and on purpose. What this one publishes is request

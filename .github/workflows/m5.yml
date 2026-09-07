@@ -1,0 +1,140 @@
+name: M5 vectorisation probe
+
+# Does the WebAssembly sandbox cost less on arm64 than on x86-64?
+#
+# WebAssembly's vector width is capped at 128 bits and is going to stay there. Arm Neon is 128 bits
+# and AVX2 is 256, so on x86-64 a native decoder can have vectors twice as wide as the guest can ever
+# have and on arm64 it has exactly the same width. If the sandbox gap is mostly a vector width gap
+# then it should be structurally smaller on arm64. The prior art ran its whole evaluation on one
+# Intel machine, so nobody has checked.
+#
+# Hosted runners are shared machines, so nothing timed here is publishable. What is publishable is
+# the instruction count, because callgrind simulates rather than measures: it counts the instructions
+# the binary executes and gets the same answer whatever the neighbour is doing. That is what makes
+# this workflow able to answer an architecture question on machines whose durations mean nothing, and
+# it is the only reason there is an arm64 half of this result at all, because the self hosted fleet is
+# entirely x86-64.
+#
+# Two tunings per architecture, because one ratio on its own says nothing. The baseline build and the
+# target-cpu=native build differ by vector width on x86-64 and do not differ by vector width on arm64,
+# so it is the pair that carries the argument.
+#
+# Nothing here fails a build on a number. A red result is information.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/m5-decode/**"
+      - "crates/iris-btr/**"
+      - "crates/iris-vm/examples/m5_vector.rs"
+      - "ci/vector_counters.py"
+      - ".github/workflows/m5.yml"
+  pull_request:
+    paths:
+      - "crates/m5-decode/**"
+      - "crates/iris-btr/**"
+      - "crates/iris-vm/examples/m5_vector.rs"
+      - "ci/vector_counters.py"
+      - ".github/workflows/m5.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  probe:
+    name: Vectorisation ${{ matrix.name }} ${{ matrix.tuning }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-24.04, tuning: baseline, rustflags: "" }
+          - { name: linux-x86_64, os: ubuntu-24.04, tuning: native, rustflags: "-C target-cpu=native" }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm, tuning: baseline, rustflags: "" }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm, tuning: native, rustflags: "-C target-cpu=native" }
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: m5-${{ matrix.name }}-${{ matrix.tuning }}
+
+      # Which machine this landed on, because target-cpu=native means something different on every
+      # one of them and a ratio without the model number next to it is not reproducible.
+      - name: Record what this machine actually is
+        run: |
+          {
+            echo "## ${{ matrix.name }} ${{ matrix.tuning }}"
+            echo '```'
+            uname -srm
+            grep -m1 'model name' /proc/cpuinfo || true
+            grep -m1 'Features' /proc/cpuinfo || true
+            grep -m1 'flags' /proc/cpuinfo || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # callgrind, which counts instructions by simulating and therefore needs no hardware support.
+      # A hosted runner is a virtual machine and will not have a performance monitoring unit to read,
+      # which the counter script checks for rather than assumes.
+      - name: An instruction counter that does not need a PMU
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
+
+      - name: Build the probe
+        run: cargo build --release --locked -p iris-vm --example m5_vector
+
+      # The durations. Not publishable off a shared machine, and recorded anyway because a ratio that
+      # changed character between two architectures would show up here first and be worth chasing on a
+      # machine where it could be measured properly.
+      - name: Durations, which are not the publishable part
+        run: |
+          {
+            echo "### Durations on a shared machine, for shape only"
+            echo '```'
+            ./target/release/examples/m5_vector --repeats 200
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          ./target/release/examples/m5_vector --repeats 200 --json \
+            > vector-${{ matrix.name }}-${{ matrix.tuning }}.json
+
+      # The publishable part. Three schemes rather than all twenty two, because callgrind is around
+      # fifty times slower than running the thing, and these three are the spread that matters: bit
+      # packing is the one that should vectorise, pseudodecimal is arithmetic over doubles, and FSST
+      # is a symbol table walk that should not vectorise on any architecture.
+      - name: Instruction counts, which are
+        run: |
+          set -euo pipefail
+          echo "### Instructions per decode" >> "$GITHUB_STEP_SUMMARY"
+          for case in int-bp dbl-pseudodecimal str-fsst; do
+            out="counters-${{ matrix.name }}-${{ matrix.tuning }}-$case.json"
+            {
+              echo "#### $case"
+              echo '```'
+              python3 ci/vector_counters.py --cases "$case" --json-out "$out" || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vector-${{ matrix.name }}-${{ matrix.tuning }}
+          path: |
+            vector-${{ matrix.name }}-${{ matrix.tuning }}.json
+            counters-${{ matrix.name }}-${{ matrix.tuning }}-*.json
+          retention-days: 30
+          if-no-files-found: error

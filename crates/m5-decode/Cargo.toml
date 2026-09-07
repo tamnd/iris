@@ -1,0 +1,27 @@
+[package]
+name = "m5-decode"
+description = "The BtrBlocks decode kernel the M5 vectorisation probe runs on both sides of the sandbox."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+# Not a crate anybody installs. It exists so the vectorisation probe has one decode kernel that both
+# the guest and the host run, and it is meaningless outside that harness.
+publish = false
+
+# Two crate types on purpose, and the purpose is the whole experiment. `cdylib` is what gets compiled
+# to wasm32 and run in the sandbox. `rlib` is what the probe links to run the same kernel natively.
+# One source, two builds, so a difference between the two sides cannot be a difference in what they
+# were asked to do.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+iris-btr.workspace = true
+
+[lints]
+workspace = true
