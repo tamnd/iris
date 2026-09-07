@@ -1,6 +1,9 @@
 //! Opening a container and pulling batches out of it.
 
+use std::future::Future;
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use arrow_array::RecordBatch;
@@ -537,14 +540,14 @@ impl Dataset<'_> {
     ) -> Result<Vec<RecordBatch>> {
         let mut decoder = Decoder::instantiate(&self.program)?;
         decoder.load_source(self.source)?;
-        run(
+        blocking(run_async(
             &mut decoder,
             &self.hello(),
             &self.schema,
             start,
             count,
             columns,
-        )
+        ))
     }
 
     /// What this host and the decoder settled on, without reading a row.
@@ -567,7 +570,7 @@ impl Dataset<'_> {
     pub fn capabilities(&self) -> Result<CapabilitySet> {
         let mut decoder = Decoder::instantiate(&self.program)?;
         decoder.load_source(self.source)?;
-        Ok(agree(&mut decoder, &self.hello())?.agreed)
+        Ok(blocking(agree_async(&mut decoder, &self.hello()))?.agreed)
     }
 
     fn hello(&self) -> Hello {
@@ -705,6 +708,15 @@ impl Windowed {
         self.scan_rows(0, self.rows)
     }
 
+    /// Reads every row, without holding the thread while the bytes are on their way.
+    ///
+    /// # Errors
+    ///
+    /// See [`Windowed::scan_rows`].
+    pub async fn scan_async(&mut self) -> Result<Vec<RecordBatch>> {
+        self.scan_rows_columns_async(0, self.rows, &[]).await
+    }
+
     /// Reads a range of rows, pulling the bytes it needs as it goes.
     ///
     /// # Errors
@@ -715,6 +727,15 @@ impl Windowed {
         self.scan_rows_columns(start, count, &[])
     }
 
+    /// Reads a range of rows, without holding the thread while the bytes are on their way.
+    ///
+    /// # Errors
+    ///
+    /// See [`Windowed::scan_rows`].
+    pub async fn scan_rows_async(&mut self, start: u64, count: u64) -> Result<Vec<RecordBatch>> {
+        self.scan_rows_columns_async(start, count, &[]).await
+    }
+
     /// Reads every row of the columns named, in the order they are named.
     ///
     /// # Errors
@@ -722,6 +743,15 @@ impl Windowed {
     /// See [`Windowed::scan_rows_columns`].
     pub fn scan_columns(&mut self, columns: &[u32]) -> Result<Vec<RecordBatch>> {
         self.scan_rows_columns(0, self.rows, columns)
+    }
+
+    /// Reads the columns named, without holding the thread while the bytes are on their way.
+    ///
+    /// # Errors
+    ///
+    /// See [`Windowed::scan_rows_columns`].
+    pub async fn scan_columns_async(&mut self, columns: &[u32]) -> Result<Vec<RecordBatch>> {
+        self.scan_rows_columns_async(0, self.rows, columns).await
     }
 
     /// Reads a range of rows of the columns named, pulling only the bytes those columns need.
@@ -748,6 +778,30 @@ impl Windowed {
         count: u64,
         columns: &[u32],
     ) -> Result<Vec<RecordBatch>> {
+        blocking(self.scan_rows_columns_async(start, count, columns))
+    }
+
+    /// The same scan, on a thread the caller wants back while the bytes are on their way.
+    ///
+    /// This is the shape a query engine wants and [`Windowed::scan_rows_columns`] is this one driven
+    /// by a thread that has agreed to sit there. A decoder that asks for a range the source does not
+    /// have yet suspends, and this future goes pending with it, so the executor runs something else
+    /// on that worker instead of spending a core on a network round trip. A source that knows when
+    /// its bytes will land wakes the task, and one that does not is asked again straight away, which
+    /// still gives the worker up between tries.
+    ///
+    /// Nothing about the scan differs. It is the same decoder, the same ranges, the same batches and
+    /// the same traffic counters, which is why there is one body here and not two.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Windowed::scan_rows_columns`].
+    pub async fn scan_rows_columns_async(
+        &mut self,
+        start: u64,
+        count: u64,
+        columns: &[u32],
+    ) -> Result<Vec<RecordBatch>> {
         let mut decoder = Decoder::instantiate(&self.program)?;
 
         // Nothing is loaded up front, so the guest's resident buffer stays empty and every range
@@ -761,14 +815,15 @@ impl Windowed {
         // should not be handed the cost of getting to the point where a scan was possible.
         let before = source.traffic();
         decoder.attach(source);
-        let outcome = run(
+        let outcome = run_async(
             &mut decoder,
             &self.hello(),
             &self.schema,
             start,
             count,
             columns,
-        );
+        )
+        .await;
         self.source = decoder.detach();
 
         // Recorded whether or not the scan worked. A scan that failed part way through still moved
@@ -794,7 +849,7 @@ impl Windowed {
         let mut decoder = Decoder::instantiate(&self.program)?;
         let source = self.source.take().ok_or(Error::SourceLost)?;
         decoder.attach(source);
-        let agreed = agree(&mut decoder, &self.hello());
+        let agreed = blocking(agree_async(&mut decoder, &self.hello()));
         self.source = decoder.detach();
         Ok(agreed?.agreed)
     }
@@ -817,7 +872,30 @@ impl Windowed {
 /// bring. That is the claim M4 makes, written as one function rather than as a sentence: a decoder
 /// handed a resident buffer and the same decoder pulling ranges out of a file it cannot hold are
 /// running the same host code.
-fn run(
+/// Runs a scan to the end on a thread that has agreed to sit there.
+///
+/// Every synchronous entry point in this module is one of the asynchronous ones driven by this, so
+/// there is one implementation of a scan and two ways to ask for it rather than two implementations
+/// that have to be kept saying the same thing.
+///
+/// The waker is the one that does nothing, which is the honest description of what this is: the
+/// thread is the scheduler, it has nothing else to run, and it comes back and asks again. A source
+/// handed this waker sees `wake_when_ready` succeed and then fires something that goes nowhere,
+/// which costs nothing and is why that method is allowed to be optimistic. Yielding between tries
+/// rather than spinning tight is what keeps a source whose fetch runs on another thread of the same
+/// pool from being starved by the thread waiting for it.
+fn blocking<T>(call: impl Future<Output = T>) -> T {
+    let mut call = pin!(call);
+    let mut cx = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(answer) = call.as_mut().poll(&mut cx) {
+            return answer;
+        }
+        std::thread::yield_now();
+    }
+}
+
+async fn run_async(
     decoder: &mut Decoder,
     hello: &Hello,
     schema: &SchemaRef,
@@ -825,7 +903,7 @@ fn run(
     count: u64,
     columns: &[u32],
 ) -> Result<Vec<RecordBatch>> {
-    let agreement = agree(decoder, hello)?;
+    let agreement = agree_async(decoder, hello).await?;
 
     // Checked before anything is asked for rather than after something comes back. A decoder that
     // never mentioned projection will read every column whatever it is sent, and the batches it
@@ -847,7 +925,10 @@ fn run(
         projection: Projection::from_bytes(&indices)?,
         ..ScanRequest::everything()
     };
-    let raw = decoder.scan(&record(|w| request.encode(w))?).wait()?;
+    let raw = decoder
+        .scan(&record(|w| request.encode(w))?)
+        .finish()
+        .await?;
 
     let mut batches = Vec::with_capacity(raw.len());
     for batch in &raw {
@@ -863,16 +944,19 @@ fn run(
 
 /// Shakes hands, and hands back what the two sides settled on.
 ///
-/// Waited on rather than polled. Waiting is what a host with a thread to spare does, and it is what
-/// this one is: it has been handed a scan and has nothing else to do until it answers. A host that
-/// does have something else to do drives `iris_vm::Running` itself, which is why the suspension is
-/// in that crate rather than hidden in here.
-///
 /// The decoder has already said yes by the time the ack is built, and the negotiation is the host
 /// saying yes back. Both sides check, because a decoder that agrees to terms it cannot meet and a
 /// host that runs a decoder it cannot serve are different bugs and only one of them is ours.
-fn agree(decoder: &mut Decoder, hello: &Hello) -> Result<Agreement> {
-    let handshake = decoder.start(&record(|w| hello.encode(w))?).wait()?;
+///
+/// Awaited rather than waited on, even though a handshake asks nothing of the source, because a
+/// decoder is allowed to read a footer in order to know its own shape and this is a call into guest
+/// code like any other. A decoder that does that on a source over a network would otherwise hold a
+/// worker for a round trip before the scan had started.
+async fn agree_async(decoder: &mut Decoder, hello: &Hello) -> Result<Agreement> {
+    let handshake = decoder
+        .start(&record(|w| hello.encode(w))?)
+        .finish()
+        .await?;
     let ack = HelloAck {
         abi_major: handshake.abi_major,
         abi_minor: handshake.abi_minor,

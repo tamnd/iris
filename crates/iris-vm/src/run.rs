@@ -26,10 +26,24 @@
 //! that calls it is not doing anything else until the decoder is done, and that is the point: a host
 //! that wants the simple shape asks for it in one word at the call site rather than getting it by
 //! default.
+//!
+//! # For a host on an executor
+//!
+//! [`Running::finish`] is the third shape and the one a query engine wants. It awaits, so a decoder
+//! that suspends gives the thread back to whatever else that executor has to run, and a source that
+//! knows when its bytes will land wakes the task instead of being asked again. On a work stealing
+//! pool that is the difference between a miss costing a core for the length of a round trip and a
+//! miss costing nothing at all.
+//!
+//! The three are the same call driven three ways and a host picks one. Poll it if the host is its
+//! own scheduler, wait on it if the host has a thread to spare, await it if the host has an
+//! executor.
 
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
+
+use iris_source::RangeSource;
 
 use crate::error::Result;
 
@@ -108,6 +122,25 @@ impl<'a, T> Running<'a, T> {
             }
         }
     }
+
+    /// Runs the decoder to the end on an executor, giving the thread back on every miss.
+    ///
+    /// This is [`Running::wait`] for a host that has somewhere else to put the thread. A suspension
+    /// comes out as the returned future being pending, so the executor is free to run something
+    /// else, and the task is woken by the source when the bytes land rather than by a timer or a
+    /// spin. A source that cannot say when that will be gets asked again immediately, which is the
+    /// same behaviour as before and still does not hold the thread.
+    ///
+    /// Not an `impl Future` on the handle itself, because [`Running::poll`] already means something
+    /// here and two methods of that name on one type, one of them arriving through a trait, is a
+    /// piece of cleverness that costs a reader more than it saves.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the call itself returns.
+    pub async fn finish(self) -> Result<T> {
+        self.call.await
+    }
 }
 
 /// Runs a call that has no way to suspend, on a thread that is already committed to it.
@@ -133,34 +166,50 @@ pub(crate) fn settled<T>(call: impl Future<Output = T>) -> T {
     }
 }
 
-/// A future that gives the thread back once and is then done.
+/// A future that gives the thread back once, having asked the source to say when to come back.
 ///
 /// This is what turns a source saying "not yet" into the call suspending. Returning `Pending` from
 /// inside a host import unwinds nothing: Wasmtime parks the guest's stack and hands control back to
 /// whoever polled [`Running`], and polling again resumes the guest at the instruction after the
 /// import call.
-pub(crate) struct Yield {
+///
+/// Which of the two things it does depends on what the source says. A source that takes the waker is
+/// promising to fire it when the fetch lands, so this parks and the executor has one fewer thing to
+/// run until then. A source that declines is either never going to be pending for long or has no way
+/// to know, and this wakes itself before parking, which yields the thread and comes straight back.
+/// Both give the thread up. Only the first one stops the task costing anything while it waits.
+pub(crate) struct Park<'s> {
+    source: &'s mut (dyn RangeSource + Send),
     given: bool,
 }
 
-impl Yield {
-    pub(crate) const fn once() -> Self {
-        Self { given: false }
+impl<'s> Park<'s> {
+    pub(crate) fn once(source: &'s mut (dyn RangeSource + Send)) -> Self {
+        Self {
+            source,
+            given: false,
+        }
     }
 }
 
-impl Future for Yield {
+impl core::fmt::Debug for Park<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Park").field("given", &self.given).finish()
+    }
+}
+
+impl Future for Park<'_> {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if self.given {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        if this.given {
             return Poll::Ready(());
         }
-        self.given = true;
-        // Woken before it is parked, so this is a yield rather than a wait. A host driving
-        // [`Running::poll`] itself ignores the waker, and a host that put this on a real executor
-        // gets a task that is rescheduled instead of one that never runs again.
-        cx.waker().wake_by_ref();
+        this.given = true;
+        if !this.source.wake_when_ready(cx.waker()) {
+            cx.waker().wake_by_ref();
+        }
         Poll::Pending
     }
 }

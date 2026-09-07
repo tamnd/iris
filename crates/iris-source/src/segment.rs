@@ -16,6 +16,8 @@
 //! the offset is added, and it cannot reach outside it by overflowing, because the addition
 //! saturates into a failed bounds check.
 
+use std::task::Waker;
+
 use crate::source::{Fetch, RangeSource, SourceError, Traffic, bounds};
 
 /// A range of another source, addressed from zero.
@@ -77,6 +79,14 @@ impl<S: RangeSource> RangeSource for Segment<S> {
         self.inner.range(self.at + at, len)
     }
 
+    fn wake_when_ready(&mut self, waker: &Waker) -> bool {
+        // Down to the source underneath, which is the only thing here that can be waiting for
+        // anything. Every wrapper in this crate has to forward this, and the reason is that the
+        // default is a correct answer rather than an error: a wrapper that forgets keeps returning
+        // right answers and quietly spins whatever is above it.
+        self.inner.wake_when_ready(waker)
+    }
+
     fn traffic(&self) -> Traffic {
         // The source underneath is the one doing the work, and it is counting the whole file
         // rather than this section. That is the right number: a host asking what a scan cost wants
@@ -102,6 +112,10 @@ impl<S: RangeSource + ?Sized> RangeSource for Box<S> {
 
     fn range(&mut self, at: u64, len: usize) -> Result<Fetch<'_>, SourceError> {
         (**self).range(at, len)
+    }
+
+    fn wake_when_ready(&mut self, waker: &Waker) -> bool {
+        (**self).wake_when_ready(waker)
     }
 
     fn traffic(&self) -> Traffic {

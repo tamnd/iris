@@ -5,14 +5,21 @@
 //! waiting. So a request is spawned onto a runtime the host already has, and every call to
 //! [`RangeSource::range`] in the meantime says [`Fetch::Pending`] and returns immediately.
 //!
-//! # Why a channel and not a future
+//! # Why a slot and not a future
 //!
 //! Holding the future itself would mean this type had to be polled with a waker, which would make
 //! every caller async and would push the choice of runtime into the decoder side of the boundary.
-//! Instead the spawned task sends its result down a plain channel and `range` calls `try_recv`,
+//! Instead the spawned task leaves its result in a small shared slot and `range` looks in the slot,
 //! which is the one operation that asks "is it here" without agreeing to wait. The cost is one
-//! allocation and one channel per request. The gain is that a synchronous host, which is what the
+//! allocation and one lock per request. The gain is that a synchronous host, which is what the
 //! sandbox side is, can drive this without knowing what a future is.
+//!
+//! The slot holds a waker as well, which is [`RangeSource::wake_when_ready`]. A caller that would
+//! rather sleep than ask again leaves one there and the fetching task fires it on the way out. That
+//! is the difference between a worker thread spinning through an object store round trip and a
+//! worker thread doing something else, and it is why the slot is behind a lock rather than being a
+//! channel: registering a waker and noticing that the answer already arrived have to be one step or
+//! the wakeup can fall between them.
 //!
 //! # One block at a time
 //!
@@ -26,8 +33,8 @@
 //! inside it, because how far ahead to read is a decision about the host and not about object stores.
 //! A host that wants it wraps this in one and picks the depth.
 
-use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::Waker;
 
 use bytes::Bytes;
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
@@ -69,7 +76,52 @@ impl Held {
 struct Inflight {
     at: u64,
     len: usize,
-    done: Receiver<object_store::Result<Bytes>>,
+    slot: Arc<Mutex<Slot>>,
+}
+
+/// Where a spawned fetch leaves its answer, and where a caller leaves a waker for it.
+///
+/// `ended` is separate from `done` being filled in because the two are different outcomes and only
+/// one of them has bytes. A task that was cancelled or a runtime that is shutting down ends without
+/// an answer, and a caller that could not tell that apart from a fetch still in flight would ask
+/// again forever.
+#[derive(Debug, Default)]
+struct Slot {
+    done: Option<object_store::Result<Bytes>>,
+    waker: Option<Waker>,
+    ended: bool,
+}
+
+/// Marks the slot finished however the fetching task leaves, and wakes whoever was waiting.
+///
+/// A guard rather than a line at the end of the task, because the interesting exit is the one that
+/// does not reach the end. Dropping a spawned task cancels the future at its await point, and the
+/// only code that still runs after that is a destructor.
+struct Fetching(Arc<Mutex<Slot>>);
+
+impl Drop for Fetching {
+    fn drop(&mut self) {
+        let waker = {
+            let mut slot = lock(&self.0);
+            slot.ended = true;
+            slot.waker.take()
+        };
+        // Outside the lock. Waking can run the woken task inline on some executors, and a task that
+        // wakes up and immediately asks this source for a range would find the lock held by the
+        // thread that just woke it.
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+/// A poisoned slot is not a reason to fail a fetch.
+///
+/// The only code that touches one is here and none of it can leave a half written value behind: the
+/// answer is moved in whole or not at all. So a panic somewhere else in the process is not a reason
+/// to lose a range that did arrive.
+fn lock(slot: &Mutex<Slot>) -> MutexGuard<'_, Slot> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Whether a fetch has landed, used to keep the borrow of `held` out of the code that mutates it.
@@ -129,25 +181,36 @@ impl ObjectSource {
 
     /// Starts a fetch, replacing anything already in flight.
     ///
-    /// Dropping the receiver for a previous request does not cancel the task, which will finish and
-    /// find nobody listening. That is the honest cost of not holding the future: a request already
-    /// paid for is not recovered. It only happens when a caller abandons a range part way through,
-    /// which a scan does not do.
+    /// Dropping the slot for a previous request does not cancel the task, which will finish and find
+    /// nobody listening. That is the honest cost of not holding the future: a request already paid
+    /// for is not recovered. It only happens when a caller abandons a range part way through, which
+    /// a scan does not do.
     fn start(&mut self, at: u64, len: usize) {
-        let (sender, done) = std::sync::mpsc::channel();
+        let slot = Arc::new(Mutex::new(Slot::default()));
+        let theirs = Arc::clone(&slot);
         let store = Arc::clone(&self.store);
         let path = self.path.clone();
         let range = at..at + len as u64;
 
         self.runtime.spawn(async move {
-            // The receiver is gone if the caller moved on. Nothing to report and nobody to report
-            // it to, so the result is dropped rather than logged, which would be a line of noise
-            // per abandoned request.
-            let _ = sender.send(store.get_range(&path, range).await);
+            let ending = Fetching(theirs);
+            let answer = store.get_range(&path, range).await;
+            let waker = {
+                let mut held = lock(&ending.0);
+                held.done = Some(answer);
+                held.waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            // Dropped here rather than left to fall off the end, so the order is the answer landing
+            // and then the slot being marked finished. The other way round, a caller could see a
+            // task that has ended and no answer, and give up on a fetch that did work.
+            drop(ending);
         });
 
         self.requests += 1;
-        self.inflight = Some(Inflight { at, len, done });
+        self.inflight = Some(Inflight { at, len, slot });
     }
 
     /// Moves the outstanding request along by one step, starting it if there is not one already.
@@ -162,12 +225,16 @@ impl ObjectSource {
         }
 
         let inflight = self.inflight.as_ref().expect("just checked there is one");
-        let arrived = match inflight.done.try_recv() {
-            Ok(arrived) => arrived,
-            Err(TryRecvError::Empty) => return Ok(Progress::Waiting),
-            // The task ended without sending, which means it was cancelled or the runtime is
+        let looked = {
+            let mut slot = lock(&inflight.slot);
+            (slot.done.take(), slot.ended)
+        };
+        let arrived = match looked {
+            (Some(arrived), _) => arrived,
+            (None, false) => return Ok(Progress::Waiting),
+            // The task ended without an answer, which means it was cancelled or the runtime is
             // shutting down. Neither is something to retry into.
-            Err(TryRecvError::Disconnected) => {
+            (None, true) => {
                 self.inflight = None;
                 return Err(SourceError::Fetch {
                     at,
@@ -235,6 +302,24 @@ impl RangeSource for ObjectSource {
         // own length, which is a usize.
         let offset = usize::try_from(at - held.at).unwrap_or(usize::MAX);
         Ok(Fetch::Ready(&held.bytes[offset..offset + len]))
+    }
+
+    /// Leaves the waker in the slot the fetching task will look in on its way out.
+    ///
+    /// Everything that could make waiting wrong is checked under the same lock the task writes
+    /// under, so there is no window between deciding to wait and being able to be woken. No request
+    /// in flight, an answer already sitting in the slot, or a task that has ended all come back
+    /// `false`, which sends the caller round to ask again instead of to sleep.
+    fn wake_when_ready(&mut self, waker: &Waker) -> bool {
+        let Some(inflight) = self.inflight.as_ref() else {
+            return false;
+        };
+        let mut slot = lock(&inflight.slot);
+        if slot.done.is_some() || slot.ended {
+            return false;
+        }
+        slot.waker = Some(waker.clone());
+        true
     }
 
     fn traffic(&self) -> Traffic {
