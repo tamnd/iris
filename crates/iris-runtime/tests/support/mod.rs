@@ -62,6 +62,8 @@ pub(crate) struct Modules {
     pub(crate) fixedwidth: Vec<u8>,
     /// The decoder that never returns.
     pub(crate) looping: Vec<u8>,
+    /// The decoder with no header and one column.
+    pub(crate) passthrough: Vec<u8>,
 }
 
 /// Compiles the decoders for wasm32, once per test binary.
@@ -89,6 +91,8 @@ pub(crate) fn modules() -> &'static Modules {
                 "fixedwidth",
                 "--example",
                 "looping",
+                "--example",
+                "passthrough",
                 "--target",
                 "wasm32-unknown-unknown",
                 "--target-dir",
@@ -130,6 +134,7 @@ pub(crate) fn modules() -> &'static Modules {
         Modules {
             fixedwidth: read("fixedwidth"),
             looping: read("looping"),
+            passthrough: read("passthrough"),
         }
     })
 }
@@ -142,6 +147,11 @@ pub(crate) fn decoder_module() -> &'static [u8] {
 /// The decoder that agrees to everything and then spins forever on the first scan.
 pub(crate) fn looping_module() -> &'static [u8] {
     &modules().looping
+}
+
+/// The decoder that reads one column of eight byte integers and has no header at all.
+pub(crate) fn passthrough_module() -> &'static [u8] {
+    &modules().passthrough
 }
 
 /// The fixed width decoder's header: how many rows, then how many columns.
@@ -207,6 +217,41 @@ pub(crate) fn builder(rows: u64, columns: u64) -> Builder {
         (ABI_MAJOR, ABI_MINOR),
         CapabilitySet::new().with(Capability::RANDOM_ACCESS),
         decoder_module().to_vec(),
+    );
+    builder
+}
+
+/// The bytes the passthrough decoder reads: one column of values and no header.
+///
+/// The values are the same [`cell`] function column zero would produce, so a test that reads this
+/// dataset and a test that reads the first column of a fixed width one are checking against the
+/// same expected numbers.
+pub(crate) fn flat_source(rows: u64) -> Vec<u8> {
+    (0..rows)
+        .flat_map(|row| cell(0, row).to_le_bytes())
+        .collect()
+}
+
+/// A container the passthrough decoder reads, which is one column and no header.
+///
+/// A second decoder matters here rather than being more of the same. Both harnesses in
+/// `tests/harness.rs` are claims about every decoder in the tree, and a claim checked against one
+/// decoder is a claim about that decoder. This one asks for its rows differently: it caps a scan at
+/// a thousand and twenty four rows of its own accord, reads no header, and offers no projection, so
+/// it exercises the harnesses against a decoder that answers a request with less than was asked
+/// for, which is legal and which a harness written around the first decoder would not have met.
+pub(crate) fn flat_builder(rows: u64) -> Builder {
+    let mut builder = Builder::new("flat", rows);
+    builder.schema(
+        SchemaEncoding::ArrowIpc,
+        schema_to_ipc(&schema(1)).expect("one integer column always encodes"),
+    );
+    builder.section(SectionKind::Data, flat_source(rows));
+    builder.embed_decoder(
+        "passthrough",
+        (ABI_MAJOR, ABI_MINOR),
+        CapabilitySet::new().with(Capability::RANDOM_ACCESS),
+        passthrough_module().to_vec(),
     );
     builder
 }
