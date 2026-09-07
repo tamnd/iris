@@ -66,6 +66,9 @@ tracing.workspace = true
 # to it, and subscribing is not something the library itself is allowed to do, so the collector
 # arrives here and only here.
 tracing-subscriber.workspace = true
+# The compilation cache writes files, so testing it means having somewhere to write them that goes
+# away afterwards.
+tempfile.workspace = true
 
 [target.'cfg(not(loom))'.dev-dependencies]
 async-trait.workspace = true
@@ -98,6 +101,9 @@ loom.workspace = true
 # probe can time one against the other. See the `probe` module for why that is a feature rather than
 # either public API or a second copy of the assembly path living in the probe.
 probe = []
+
+[[example]]
+name = "cold_start"
 
 [[example]]
 name = "guard_cost"

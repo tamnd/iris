@@ -81,6 +81,10 @@ What declaring ranges is actually worth against a well configured Parquet reader
 
 What running a decoder inside WebAssembly costs against running the same decoder natively, measured on arm64 and on x86-64, is in [`docs/VECTORISATION.md`](docs/VECTORISATION.md). The sandbox is cheaper on arm64, and the usual explanation for that, which is that the guest's 128 bit vectors are only half the width of AVX2, turns out to account for about a tenth of it. The gap is instructions rather than stalls, the guest executes about 1.7 times the host's instructions on both architectures, and this kernel does not use the guest vectors it already has.
 
+## What opening a container costs
+
+Most of what an open costs is compiling the decoder, which is the same work every time and used to be thrown away when the process ended. [`docs/COLD_START.md`](docs/COLD_START.md) measures an open four ways and puts a number on what keeping the compiled form in a directory is worth. It is a very large number, the cache is off until an operator names a directory, and that document also says what the key covers and why an entry compiled by a different Wasmtime can never be found.
+
 ## Releasing
 
 How a version is cut, published to crates.io and what the self hosted machines are for is in [`docs/RELEASING.md`](docs/RELEASING.md). The version scheme while the major is zero is worth knowing before reading a tag: a minor tracks a completed milestone and a patch is everything in between, so `v0.1.0` is the tree where M0 finished.

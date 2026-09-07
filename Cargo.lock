@@ -2260,6 +2260,7 @@ dependencies = [
  "loom",
  "object_store 0.14.1",
  "parquet",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -2293,8 +2294,10 @@ name = "iris-vm"
 version = "0.7.1"
 dependencies = [
  "iris-abi",
+ "iris-format",
  "iris-source",
  "m5-decode",
+ "tempfile",
  "thiserror",
  "wasmtime",
 ]
