@@ -137,6 +137,16 @@ undocumented_unsafe_blocks = "deny"
 codegen-units = 1
 lto = "fat"
 
+# Dependencies optimised, this workspace not. Almost every test here ends up inside Wasmtime, and an
+# unoptimised Cranelift compiles a small module about two orders of magnitude slower than an
+# optimised one, so a suite that instantiates a decoder a few thousand times spends nearly all of its
+# time in somebody else's compiler. The crates being tested stay unoptimised, so a backtrace still
+# names the function it came from and a debugger still steps through it.
+#
+# The cost is the first build after a dependency changes, which is paid once and is cached in CI.
+[profile.dev.package."*"]
+opt-level = 2
+
 # Benchmarks and profiling need symbols, and they need the release optimisation
 # level or the numbers mean nothing.
 [profile.profiling]
