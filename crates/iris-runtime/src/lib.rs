@@ -162,6 +162,23 @@
 //! kernel proved under one of them is substituted on that open path, and a host offering anything
 //! else gets the sandbox rather than code nobody compared under those terms.
 //!
+//! # Saying afterwards which one ran
+//!
+//! A kernel that has been proved produces what the module produces, so nothing in a batch says which
+//! side made it. That is the point, right up until an answer is wrong, and then which side made it is
+//! the first question and there is nothing to look at.
+//!
+//! So every scan records one event at debug level, on the target `iris::scan`, on both open paths,
+//! whether the scan worked or not. It carries the path that ran, the digest of the decoder the
+//! container shipped, and on a substituted scan the digest of the differential run that admitted the
+//! substitute along with what that implementation calls itself. [`Dataset::decoder_is_native`]
+//! answers the same question for code rather than for a person, and it only answers it about a
+//! dataset somebody still has in hand.
+//!
+//! Nothing is installed to receive that. A collector is the embedder's to choose, and a library that
+//! installed one would be choosing where somebody else's logs go. A host that wants these turns on
+//! `iris::scan` at debug in whatever collector it already has.
+//!
 //! # What it does not do yet
 //!
 //! Nothing here reads ahead on its own. A source handed to [`Runtime::open_windowed`] is used
@@ -251,7 +268,9 @@ pub use iris_abi::{Capability, CapabilitySet};
 /// one means implementing [`Native`], proving it with a [`Differential`] over a [`Corpus`], and
 /// registering the [`Kernel`] that comes out. A host that has gone to the trouble of rewriting a
 /// decoder should not also have to work out which crate each of those lives in.
-pub use iris_native::{Case, Corpus, Differential, Kernel, Mismatch, Native, Registry, Scanning};
+pub use iris_native::{
+    Case, Corpus, Differential, Kernel, Mismatch, Native, Registry, Scanning, Substitution,
+};
 
 /// The identity of a decoder, which is the hash of its bytes and nothing else.
 ///

@@ -37,6 +37,22 @@ pub type Scanning<'a> = Pin<Box<dyn Future<Output = Result<Vec<RawBatch>>> + Sen
 /// still get validated by Arrow. Substitution replaces the sandbox and nothing else, and the
 /// batches a native implementation emits are checked exactly as hard as the ones a guest emits.
 pub trait Native: fmt::Debug + Send + Sync {
+    /// What this implementation is, in words somebody reading a log can act on.
+    ///
+    /// It goes into the kernel digest and into the line every substituted scan writes, so a host
+    /// that has several kernels can tell which one produced a batch without attaching a debugger to
+    /// find out. Something like `fixedwidth-avx2 1.2.0` is the shape of it.
+    ///
+    /// This one is self asserted and the decoder's name is not, which is not an inconsistency. The
+    /// name in a container is written by whoever wrote the container, so trusting it would be
+    /// letting a dataset choose which code runs. This is written by whoever installed the native
+    /// code, which is the operator, and an operator that lies here is lying to their own logs.
+    ///
+    /// Worth putting a version in it. Two builds of the same implementation that answer this the
+    /// same way are indistinguishable from the outside, because nothing running in a process can
+    /// hash the machine code that is executing.
+    fn identity(&self) -> &str;
+
     /// Answers a [`Hello`] the way the module this stands in for would.
     ///
     /// The host negotiates against this answer with the same function it uses on the guest's, so an

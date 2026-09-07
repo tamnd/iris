@@ -43,6 +43,7 @@ const RECORD_LIMIT: usize = 1 << 20;
 #[derive(Clone, Debug)]
 pub struct Kernel {
     digest: Digest,
+    proof: Digest,
     native: Arc<dyn Native>,
     offered: Vec<CapabilitySet>,
 }
@@ -58,6 +59,26 @@ impl Kernel {
         self.digest
     }
 
+    /// The identity of the run that admitted this kernel, which is what a host logs it as.
+    ///
+    /// A substituted scan writes this down as the kernel digest, next to the digest of the decoder
+    /// it stood in for, so that a wrong answer can be traced to the thing that produced it from a
+    /// log rather than from a debugger. It covers the module, the implementation's own
+    /// [`identity`](Native::identity), the terms, and every case in the corpus by name, shape and
+    /// content, so two hosts reporting the same value ran an implementation that calls itself the
+    /// same thing and was compared against the same module, under the same terms, over the same
+    /// bytes.
+    ///
+    /// It is a digest of the proof rather than of the machine code, and the difference is worth
+    /// stating rather than glossing. Nothing running in a process can hash the code that is
+    /// executing, so an implementation that is edited without its identity or its corpus changing
+    /// reports the value it reported before. That is the reason [`Native::identity`] is expected to
+    /// carry a version.
+    #[must_use]
+    pub const fn proof(&self) -> Digest {
+        self.proof
+    }
+
     /// The terms this implementation was proved under.
     ///
     /// A host offering anything else gets the sandbox, which is the point of recording them. See
@@ -68,8 +89,8 @@ impl Kernel {
     }
 
     /// Takes the parts apart for the registry.
-    pub(crate) fn into_parts(self) -> (Digest, Arc<dyn Native>, Vec<CapabilitySet>) {
-        (self.digest, self.native, self.offered)
+    pub(crate) fn into_parts(self) -> (Digest, Digest, Arc<dyn Native>, Vec<CapabilitySet>) {
+        (self.digest, self.proof, self.native, self.offered)
     }
 
     /// A kernel that never ran anything, for the tests in this crate that are about the table.
@@ -85,6 +106,7 @@ impl Kernel {
     ) -> Self {
         Self {
             digest,
+            proof: Digest::of(b"a kernel that never ran anything"),
             native,
             offered,
         }
@@ -171,8 +193,10 @@ impl<'a> Differential<'a> {
     /// than as two buffers.
     pub fn verify(self, native: Arc<dyn Native>, corpus: &Corpus) -> Result<Kernel, Mismatch> {
         self.run(native.as_ref(), corpus)?;
+        let digest = Digest::of(self.module);
         Ok(Kernel {
-            digest: Digest::of(self.module),
+            digest,
+            proof: proof(digest, native.identity(), &self.offered, corpus),
             native,
             offered: self.offered,
         })
@@ -304,6 +328,48 @@ fn run_case(
         }
     }
     Ok(served)
+}
+
+/// The identity of a passing run, which is what [`Kernel::proof`] hands back.
+///
+/// Everything that decides what the run proved goes in, in a fixed order and with every variable
+/// length piece preceded by its length, so that two different proofs cannot be written the same way
+/// by moving a boundary. The tag at the front is there so a value from a later version of this
+/// encoding is a different digest rather than a confusing one.
+///
+/// The cases go in by name, shape and content digest rather than by their bytes, which keeps this
+/// from copying a corpus that may be gigabytes. A digest of the data is as good as the data for
+/// telling two corpora apart, which is the only thing this is for.
+fn proof(module: Digest, identity: &str, offered: &[CapabilitySet], corpus: &Corpus) -> Digest {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"iris kernel proof v1\n");
+    out.extend_from_slice(module.as_bytes());
+    counted(&mut out, identity.as_bytes());
+
+    out.extend_from_slice(&length(offered.len()).to_le_bytes());
+    for terms in offered {
+        counted(&mut out, terms.as_bytes());
+    }
+
+    out.extend_from_slice(&length(corpus.len()).to_le_bytes());
+    for case in corpus.cases() {
+        counted(&mut out, case.name().as_bytes());
+        out.extend_from_slice(&case.rows().to_le_bytes());
+        out.extend_from_slice(&u64::from(case.columns()).to_le_bytes());
+        out.extend_from_slice(Digest::of(case.data()).as_bytes());
+    }
+    Digest::of(&out)
+}
+
+/// Writes a run of bytes with its length in front of it.
+fn counted(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&length(bytes.len()).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+/// A count, as the fixed width number the encoding above uses everywhere.
+fn length(count: usize) -> u64 {
+    u64::try_from(count).expect("a length in this process fits in sixty four bits")
 }
 
 /// The two batch sizes every case is run at.

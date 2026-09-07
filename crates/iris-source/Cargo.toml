@@ -15,7 +15,6 @@ readme = "README.md"
 [dependencies]
 bytes.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 object_store = { workspace = true, optional = true }
 # rt alone. The object store source spawns its request onto a runtime the host already has and never

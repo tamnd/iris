@@ -14,7 +14,7 @@ use iris_abi::{
 };
 use iris_format::layout::HEADER_SIZE;
 use iris_format::{Container, Digest, Directory, Placement, SchemaEncoding, Section, SectionKind};
-use iris_native::{Native, Registry};
+use iris_native::{Native, Registry, Substitution};
 use iris_source::{Fetch, RangeSource, Segment, SourceError, Traffic, bounds, read_blocking};
 use iris_trust::{Policy, Verified};
 use iris_vm::{Decoder, Handshake, Program, RawBatch, Vm};
@@ -270,12 +270,11 @@ impl Runtime {
         let source = container.section_bytes(data_section(container.directory())?);
 
         Ok(Dataset {
-            decoding: opened.decoding,
+            chosen: opened.chosen,
             schema: opened.schema,
             source,
             rows: opened.rows,
             name: opened.name,
-            digest: opened.digest,
             max_batch_rows: self.max_batch_rows,
         })
     }
@@ -338,14 +337,13 @@ impl Runtime {
         let data = Segment::new(source, at, len)?;
 
         Ok(Windowed {
-            decoding: opened.decoding,
+            chosen: opened.chosen,
             schema: opened.schema,
             source: Some(Box::new(data)),
             window_bytes,
             source_bytes: len,
             rows: opened.rows,
             name: opened.name,
-            digest: opened.digest,
             max_batch_rows: self.max_batch_rows,
             last_scan: Traffic::NONE,
         })
@@ -427,7 +425,7 @@ impl Runtime {
         // sandbox instead. That is the direction to fail in: adding a capability to what this host
         // offers costs substitution until somebody runs the differential again.
         let decoding = match self.native.get(&digest, offered) {
-            Some(native) => Decoding::Native(native),
+            Some(substitution) => Decoding::Native(substitution),
             None => Decoding::Wasm(
                 self.decoders
                     .get_or_build(&digest, verified.module().len(), || {
@@ -438,22 +436,32 @@ impl Runtime {
         };
 
         Ok(Opened {
-            decoding,
+            chosen: Chosen { digest, decoding },
             schema,
             rows: directory.dataset().rows,
             name: directory.dataset().name.clone(),
-            digest,
         })
     }
 }
 
 /// What both open paths have once the metadata has been read and the decoder is ready to run.
 struct Opened {
-    decoding: Decoding,
+    chosen: Chosen,
     schema: SchemaRef,
     rows: u64,
     name: String,
+}
+
+/// Which implementation is going to read the rows, and the digest that chose it.
+///
+/// The two travel together because every scan has to write both of them down, and a pair of
+/// arguments is a pair somebody can hand the digest of one decoder and the implementation of
+/// another. There is one place they are put together, which is the lookup that used the digest to
+/// pick the implementation, and after that they move as one thing.
+#[derive(Clone, Debug)]
+struct Chosen {
     digest: Digest,
+    decoding: Decoding,
 }
 
 /// Which code is going to read this container's rows.
@@ -469,7 +477,11 @@ enum Decoding {
     Wasm(Program),
 
     /// Host code registered against the digest of that module, run in place of it.
-    Native(Arc<dyn Native>),
+    ///
+    /// The lookup hands back the implementation and the proof it was admitted on together, rather
+    /// than the implementation on its own, because a scan has to be able to say afterwards which one
+    /// it ran. See [`note`], which is the only reader of the second half.
+    Native(Substitution),
 }
 
 /// The one section a decoder is shown.
@@ -515,12 +527,11 @@ fn read(source: &mut dyn RangeSource, at: u64, len: usize) -> Result<Vec<u8>> {
 /// costs a fraction of what compiling costs.
 #[derive(Clone, Debug)]
 pub struct Dataset<'a> {
-    decoding: Decoding,
+    chosen: Chosen,
     schema: SchemaRef,
     source: &'a [u8],
     rows: u64,
     name: String,
-    digest: Digest,
     max_batch_rows: u64,
 }
 
@@ -551,7 +562,7 @@ impl Dataset<'_> {
     /// happened to be, which is the only way a caller can say that from the outside.
     #[must_use]
     pub const fn decoder_digest(&self) -> Digest {
-        self.digest
+        self.chosen.digest
     }
 
     /// What the last scan cost, which on this path is nothing.
@@ -620,7 +631,18 @@ impl Dataset<'_> {
         count: u64,
         columns: &[u32],
     ) -> Result<Vec<RecordBatch>> {
-        match &self.decoding {
+        let outcome = self.run(start, count, columns);
+        note(&self.chosen, start, count, columns, &outcome);
+        outcome
+    }
+
+    /// The scan itself, with the line about it written by the caller above.
+    ///
+    /// Split out so there is one place the outcome exists before it is returned. A scan that logged
+    /// on the way out of each arm would be two lines to keep saying the same thing, and the failing
+    /// paths would be the ones that got missed.
+    fn run(&self, start: u64, count: u64, columns: &[u32]) -> Result<Vec<RecordBatch>> {
+        match &self.chosen.decoding {
             Decoding::Wasm(program) => {
                 let mut decoder = Decoder::instantiate(program)?;
                 decoder.load_source(self.source)?;
@@ -638,10 +660,10 @@ impl Dataset<'_> {
             // because that is the only place guest code can address. Native code is running in this
             // process and can read the buffer where it already is, so it is handed a source over the
             // same bytes rather than a copy of them.
-            Decoding::Native(native) => {
+            Decoding::Native(substitution) => {
                 let mut source = Resident { bytes: self.source };
                 blocking(run_native(
-                    native.as_ref(),
+                    substitution.native(),
                     &mut source,
                     &self.hello(),
                     &self.schema,
@@ -671,13 +693,15 @@ impl Dataset<'_> {
     /// Returns [`Error::Refused`] if the decoder and this host cannot agree on terms at all, and
     /// [`Error::Vm`] if the decoder trapped during the handshake.
     pub fn capabilities(&self) -> Result<CapabilitySet> {
-        match &self.decoding {
+        match &self.chosen.decoding {
             Decoding::Wasm(program) => {
                 let mut decoder = Decoder::instantiate(program)?;
                 decoder.load_source(self.source)?;
                 Ok(blocking(agree_wasm(&mut decoder, &self.hello()))?.agreed)
             }
-            Decoding::Native(native) => Ok(agree_native(native.as_ref(), &self.hello())?.agreed),
+            Decoding::Native(substitution) => {
+                Ok(agree_native(substitution.native(), &self.hello())?.agreed)
+            }
         }
     }
 
@@ -693,7 +717,7 @@ impl Dataset<'_> {
     /// out which of the two ran.
     #[must_use]
     pub const fn decoder_is_native(&self) -> bool {
-        matches!(self.decoding, Decoding::Native(_))
+        matches!(self.chosen.decoding, Decoding::Native(_))
     }
 
     fn hello(&self) -> Hello {
@@ -718,14 +742,13 @@ impl Dataset<'_> {
 /// place: reading a range moves a window, counts a request, and in general is not something two
 /// scans can do to the same source at once.
 pub struct Windowed {
-    decoding: Decoding,
+    chosen: Chosen,
     schema: SchemaRef,
     source: Option<Box<dyn RangeSource + Send>>,
     window_bytes: u64,
     source_bytes: u64,
     rows: u64,
     name: String,
-    digest: Digest,
     max_batch_rows: u64,
     last_scan: Traffic,
 }
@@ -791,7 +814,7 @@ impl Windowed {
     /// happened to be, which is the only way a caller can say that from the outside.
     #[must_use]
     pub const fn decoder_digest(&self) -> Digest {
-        self.digest
+        self.chosen.digest
     }
 
     /// What the last scan cost, in requests to the source and bytes brought back.
@@ -936,7 +959,7 @@ impl Windowed {
         // handed the cost of getting to the point where a scan was possible.
         let before = source.traffic();
         let (outcome, back) = decode(
-            &self.decoding,
+            &self.chosen,
             source,
             &self.hello(),
             &self.schema,
@@ -967,7 +990,7 @@ impl Windowed {
     /// The same as [`Dataset::capabilities`], plus [`Error::SourceLost`] if the source is not
     /// attached.
     pub fn capabilities(&mut self) -> Result<CapabilitySet> {
-        match &self.decoding {
+        match &self.chosen.decoding {
             Decoding::Wasm(program) => {
                 let mut decoder = Decoder::instantiate(program)?;
                 let source = self.source.take().ok_or(Error::SourceLost)?;
@@ -981,11 +1004,11 @@ impl Windowed {
             // attached, and then a dataset whose source was lost to a panicking scan would report
             // capabilities happily and fail at the first scan. Answering the same way on both paths
             // is worth more than saving a check.
-            Decoding::Native(native) => {
+            Decoding::Native(substitution) => {
                 if self.source.is_none() {
                     return Err(Error::SourceLost);
                 }
-                Ok(agree_native(native.as_ref(), &self.hello())?.agreed)
+                Ok(agree_native(substitution.native(), &self.hello())?.agreed)
             }
         }
     }
@@ -995,7 +1018,7 @@ impl Windowed {
     /// See [`Dataset::decoder_is_native`], which answers the same question about the other path.
     #[must_use]
     pub const fn decoder_is_native(&self) -> bool {
-        matches!(self.decoding, Decoding::Native(_))
+        matches!(self.chosen.decoding, Decoding::Native(_))
     }
 
     fn hello(&self) -> Hello {
@@ -1047,7 +1070,7 @@ fn blocking<T>(call: impl Future<Output = T>) -> T {
 /// promise to survive. So a scan future that borrowed the dataset could not be spawned, which is the
 /// whole point of there being an asynchronous scan.
 async fn decode(
-    decoding: &Decoding,
+    chosen: &Chosen,
     source: Box<dyn RangeSource + Send>,
     hello: &Hello,
     schema: &SchemaRef,
@@ -1058,23 +1081,21 @@ async fn decode(
     Result<Vec<RecordBatch>>,
     Option<Box<dyn RangeSource + Send>>,
 ) {
-    match decoding {
-        Decoding::Wasm(program) => {
-            let mut decoder = match Decoder::instantiate(program) {
-                Ok(decoder) => decoder,
-                Err(err) => return (Err(err.into()), Some(source)),
-            };
-
-            // Nothing is loaded up front, so the guest's resident buffer stays empty and every range
-            // the decoder asks for goes out through `require_range`.
-            decoder.attach(source);
-            let outcome = run_wasm(&mut decoder, hello, schema, start, count, columns).await;
-            (outcome, decoder.detach())
-        }
-        Decoding::Native(native) => {
+    let (outcome, back) = match &chosen.decoding {
+        Decoding::Wasm(program) => match Decoder::instantiate(program) {
+            Err(err) => (Err(err.into()), Some(source)),
+            Ok(mut decoder) => {
+                // Nothing is loaded up front, so the guest's resident buffer stays empty and every
+                // range the decoder asks for goes out through `require_range`.
+                decoder.attach(source);
+                let outcome = run_wasm(&mut decoder, hello, schema, start, count, columns).await;
+                (outcome, decoder.detach())
+            }
+        },
+        Decoding::Native(substitution) => {
             let mut source = source;
             let outcome = run_native(
-                native.as_ref(),
+                substitution.native(),
                 source.as_mut(),
                 hello,
                 schema,
@@ -1085,7 +1106,9 @@ async fn decode(
             .await;
             (outcome, Some(source))
         }
-    }
+    };
+    note(chosen, start, count, columns, &outcome);
+    (outcome, back)
 }
 
 /// Shakes hands with the decoder in the container, scans, and turns what comes back into batches.
@@ -1133,6 +1156,58 @@ async fn run_native(
     let request = plan.request(start, count)?;
     let raw = native.scan(hello, &request, source).await?;
     assemble(&plan.projected, &raw)
+}
+
+/// Writes down which of the two implementations ran, and what it was.
+///
+/// One event per scan, on both paths, whether the scan worked or not. The question it answers is the
+/// first one anybody asks when a number is wrong: did this come out of the sandbox or out of native
+/// code. That is not answerable from the batches, because agreeing on the batches is the whole point
+/// of substitution, and it is not answerable from a return value either, since both paths return the
+/// same type. So it has to be written down at the time.
+///
+/// Three identities and they are three different things. `decoder` is the digest `iris-trust`
+/// computed from the module bytes in the container, which names the decoder the dataset shipped
+/// whichever implementation ended up reading it. `kernel` is the digest of the differential run that
+/// admitted the substitute, so two hosts that log the same value ran the same implementation against
+/// the same corpus under the same terms. `implementation` is what that code calls itself, which is
+/// the one an operator can act on directly and the one nothing verifies. On the sandbox path the
+/// last two are absent, which is itself the answer.
+///
+/// At debug rather than at info, because it is per scan and a scan can be a millisecond. A host that
+/// wants it in production turns it on for `iris::scan` and gets this without the rest of the crate's
+/// debug output.
+///
+/// The failure goes in the same event rather than a second one. A scan that failed still ran on one
+/// of the two paths, and that is exactly the case where somebody wants to know which.
+fn note(
+    chosen: &Chosen,
+    start: u64,
+    count: u64,
+    columns: &[u32],
+    outcome: &Result<Vec<RecordBatch>>,
+) {
+    let (path, kernel, implementation) = match &chosen.decoding {
+        Decoding::Wasm(_) => ("sandbox", None, None),
+        Decoding::Native(substitution) => (
+            "native",
+            Some(substitution.proof()),
+            Some(substitution.identity()),
+        ),
+    };
+    tracing::debug!(
+        target: "iris::scan",
+        path,
+        decoder = %chosen.digest,
+        kernel = kernel.map(tracing::field::display),
+        implementation,
+        row_start = start,
+        row_count = count,
+        columns = ?columns,
+        batches = outcome.as_ref().map_or(0, Vec::len),
+        failed = outcome.as_ref().err().map(tracing::field::display),
+        "scanned",
+    );
 }
 
 /// What a scan settles before it asks for a row.

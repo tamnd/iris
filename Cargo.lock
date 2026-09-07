@@ -2262,6 +2262,8 @@ dependencies = [
  "parquet",
  "thiserror",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2274,7 +2276,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -2295,7 +2296,6 @@ dependencies = [
  "iris-source",
  "m5-decode",
  "thiserror",
- "tracing",
  "wasmtime",
 ]
 

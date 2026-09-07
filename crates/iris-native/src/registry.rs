@@ -47,11 +47,48 @@ pub struct Registry {
     entries: Arc<HashMap<Digest, Entry>>,
 }
 
-/// One implementation and the terms it was proved under.
+/// One implementation, the proof behind it and the terms it was proved under.
 #[derive(Clone, Debug)]
 struct Entry {
     native: Arc<dyn Native>,
+    proof: Digest,
     offered: Vec<CapabilitySet>,
+}
+
+/// An implementation a lookup found, and the proof it was admitted on.
+///
+/// A host that substitutes has to be able to say afterwards what it substituted, so a lookup hands
+/// back the implementation and the identity of the run that let it in rather than the implementation
+/// on its own. That is what a scan writes down, and it is why the two arrive together: a code path
+/// that had the implementation and had to go somewhere else for the proof is a code path that can
+/// log the wrong one.
+#[derive(Clone, Debug)]
+pub struct Substitution {
+    native: Arc<dyn Native>,
+    proof: Digest,
+}
+
+impl Substitution {
+    /// The implementation to run.
+    #[must_use]
+    pub fn native(&self) -> &dyn Native {
+        self.native.as_ref()
+    }
+
+    /// The identity of the differential run this implementation came out of.
+    ///
+    /// See [`Kernel::proof`](crate::Kernel::proof), which is where it is computed and where the
+    /// limits of it are written down.
+    #[must_use]
+    pub const fn proof(&self) -> Digest {
+        self.proof
+    }
+
+    /// What the implementation calls itself, for whoever is reading the log.
+    #[must_use]
+    pub fn identity(&self) -> &str {
+        self.native.identity()
+    }
 }
 
 impl Registry {
@@ -71,8 +108,15 @@ impl Registry {
     /// then silently never fires.
     #[must_use]
     pub fn with(mut self, kernel: Kernel) -> Self {
-        let (digest, native, offered) = kernel.into_parts();
-        Arc::make_mut(&mut self.entries).insert(digest, Entry { native, offered });
+        let (digest, proof, native, offered) = kernel.into_parts();
+        Arc::make_mut(&mut self.entries).insert(
+            digest,
+            Entry {
+                native,
+                proof,
+                offered,
+            },
+        );
         self
     }
 
@@ -87,11 +131,14 @@ impl Registry {
     ///
     /// A caller that has a name and no digest has nothing to ask with, which is the point.
     #[must_use]
-    pub fn get(&self, digest: &Digest, offered: CapabilitySet) -> Option<Arc<dyn Native>> {
+    pub fn get(&self, digest: &Digest, offered: CapabilitySet) -> Option<Substitution> {
         self.entries
             .get(digest)
             .filter(|entry| entry.offered.contains(&offered))
-            .map(|entry| Arc::clone(&entry.native))
+            .map(|entry| Substitution {
+                native: Arc::clone(&entry.native),
+                proof: entry.proof,
+            })
     }
 
     /// How many implementations are registered.
@@ -129,6 +176,10 @@ mod tests {
     struct Stub;
 
     impl Native for Stub {
+        fn identity(&self) -> &'static str {
+            "stub"
+        }
+
         fn handshake(&self, _hello: &Hello) -> Result<Handshake> {
             unreachable!("the registry tests never run a decoder")
         }

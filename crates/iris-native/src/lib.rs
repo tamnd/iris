@@ -18,6 +18,7 @@
 //! # #[derive(Debug)]
 //! # struct Mine;
 //! # impl iris_native::Native for Mine {
+//! #     fn identity(&self) -> &str { "mine 1.0.0" }
 //! #     fn handshake(&self, _: &Hello) -> iris_native::Result<Handshake> { unimplemented!() }
 //! #     fn scan<'a>(&'a self, _: &'a Hello, _: &'a ScanRequest<'a>,
 //! #         _: &'a mut (dyn RangeSource + Send)) -> iris_native::Scanning<'a> { unimplemented!() }
@@ -77,6 +78,15 @@
 //!
 //! What the run covers is the corpus it was given, and [`Corpus`] is plain about what that is worth.
 //!
+//! # Saying afterwards what ran
+//!
+//! When an answer is wrong, the first question is which of the two implementations produced it, and
+//! that should come out of a log rather than out of a debugger. A passing run therefore has an
+//! identity of its own, [`Kernel::proof`], covering the module, the implementation's
+//! [`Native::identity`], the terms and the corpus. A [`Registry`] lookup hands back a
+//! [`Substitution`] carrying both that value and the implementation, so the host that substitutes
+//! has, in one place, everything it needs to write down what it did.
+//!
 //! # What substitution does not skip
 //!
 //! Everything except running the module. The module is still read out of the container and still
@@ -102,7 +112,7 @@ mod registry;
 pub use corpus::{Case, Corpus};
 pub use differential::{Differential, Kernel, Mismatch};
 pub use native::{Error, Native, Result, Scanning};
-pub use registry::Registry;
+pub use registry::{Registry, Substitution};
 
 /// The version of this crate, as reported by build metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

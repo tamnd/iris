@@ -16,7 +16,6 @@ readme = "README.md"
 iris-abi.workspace = true
 iris-source.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 wasmtime.workspace = true
 
 [dev-dependencies]

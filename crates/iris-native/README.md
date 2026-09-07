@@ -10,6 +10,8 @@ Knowing which module an implementation stands in for says nothing about whether 
 
 The terms are part of what is proved. A kernel records the capability sets it was run under, and a host offering anything else gets the sandbox rather than code nobody compared under those terms.
 
+A passing run has an identity of its own, covering the module, what the implementation calls itself, the terms and the corpus, and a lookup hands that back alongside the implementation rather than making the caller go and find it. That is what a host writes into the line it logs for the scan, so the question of which of the two implementations produced a wrong answer comes out of a log rather than out of a debugger.
+
 Substitution replaces compiling and running the module and nothing else. The module is still hashed and checked, the handshake is still negotiated the same way, and every batch still goes through `iris-guard` and Arrow.
 
 Part of [iris](https://github.com/tamnd/iris). Licensed under Apache-2.0.

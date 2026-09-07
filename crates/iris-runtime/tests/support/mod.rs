@@ -420,11 +420,21 @@ pub(crate) async fn fixedwidth_batches(
     Ok(batches)
 }
 
+/// What [`FixedWidth`] calls itself in a log.
+///
+/// A constant rather than a literal in the impl, because the tests that read a log line have to
+/// assert on the same string the implementation wrote, and two copies of it would drift.
+pub(crate) const FIXEDWIDTH_IDENTITY: &str = "fixedwidth-test 1.0.0";
+
 /// A native implementation of the fixed width decoder that agrees with it.
 #[derive(Debug)]
 pub(crate) struct FixedWidth;
 
 impl Native for FixedWidth {
+    fn identity(&self) -> &'static str {
+        FIXEDWIDTH_IDENTITY
+    }
+
     fn handshake(&self, _hello: &Hello) -> iris_native::Result<Handshake> {
         Ok(fixedwidth_handshake())
     }

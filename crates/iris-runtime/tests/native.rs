@@ -262,6 +262,10 @@ fn what_a_native_implementation_emits_is_checked_like_anything_else() {
     struct Deceitful;
 
     impl Native for Deceitful {
+        fn identity(&self) -> &'static str {
+            "deceitful 1.0.0"
+        }
+
         fn handshake(&self, _hello: &Hello) -> Result<Handshake> {
             Ok(fixedwidth_handshake())
         }
