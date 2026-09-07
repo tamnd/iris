@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
@@ -17,16 +17,16 @@ categories = ["database-implementations", "encoding", "wasm"]
 # package at a file outside itself, which cargo packages by accident and warns about.
 
 [workspace.dependencies]
-iris-abi = { path = "crates/iris-abi", version = "0.5.2" }
-iris-btr = { path = "crates/iris-btr", version = "0.5.2" }
-iris-decoder = { path = "crates/iris-decoder", version = "0.5.2" }
-iris-format = { path = "crates/iris-format", version = "0.5.2" }
-iris-guard = { path = "crates/iris-guard", version = "0.5.2" }
-iris-native = { path = "crates/iris-native", version = "0.5.2" }
-iris-runtime = { path = "crates/iris-runtime", version = "0.5.2" }
-iris-source = { path = "crates/iris-source", version = "0.5.2" }
-iris-trust = { path = "crates/iris-trust", version = "0.5.2" }
-iris-vm = { path = "crates/iris-vm", version = "0.5.2" }
+iris-abi = { path = "crates/iris-abi", version = "0.6.0" }
+iris-btr = { path = "crates/iris-btr", version = "0.6.0" }
+iris-decoder = { path = "crates/iris-decoder", version = "0.6.0" }
+iris-format = { path = "crates/iris-format", version = "0.6.0" }
+iris-guard = { path = "crates/iris-guard", version = "0.6.0" }
+iris-native = { path = "crates/iris-native", version = "0.6.0" }
+iris-runtime = { path = "crates/iris-runtime", version = "0.6.0" }
+iris-source = { path = "crates/iris-source", version = "0.6.0" }
+iris-trust = { path = "crates/iris-trust", version = "0.6.0" }
+iris-vm = { path = "crates/iris-vm", version = "0.6.0" }
 # No version on this one, unlike every line above it. It is not published, and a dev-dependency
 # without a version is dropped when the crate that uses it is packaged, which is what keeps
 # `iris-vm` publishable while its vectorisation probe links against this.
