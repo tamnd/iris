@@ -239,6 +239,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 // different things: one owns a copy of the container and the other owns a source it reads through.
 const _: () = {
     const fn is_send<T: Send>() {}
+    const fn is_sync<T: Sync>() {}
+
     is_send::<Runtime>();
     is_send::<Dataset<'static>>();
     is_send::<Windowed>();
@@ -247,6 +249,5 @@ const _: () = {
     // here that is meant to be held by several threads at once rather than moved between them: a
     // table provider hands out one handle to it per partition, and the pool of compiled decoders
     // inside it is worth nothing at all if it can only be reached from the thread that made it.
-    const fn is_sync<T: Sync>() {}
     is_sync::<Runtime>();
 };

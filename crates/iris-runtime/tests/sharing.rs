@@ -22,6 +22,12 @@ use support::{builder, column_values, flat_builder};
 /// Small, because none of this is about how long a scan takes.
 const ROWS: u64 = 512;
 
+/// [`ROWS`] as a length, because a column's values come back as a slice and a container counts its
+/// rows in a width that does not depend on the host.
+fn expected_rows() -> usize {
+    usize::try_from(ROWS).expect("a few hundred rows fit in a usize on anything this runs on")
+}
+
 /// Enough threads that they overlap on an ordinary machine, and few enough to be polite.
 const THREADS: usize = 8;
 
@@ -46,7 +52,7 @@ fn eight_threads_opening_one_container_compile_the_decoder_once() {
         let values = reader.join().expect("no reader panics");
         assert_eq!(
             values.len(),
-            ROWS as usize,
+            expected_rows(),
             "a thread that shared a compiled decoder still read the whole table"
         );
     }
@@ -118,7 +124,7 @@ fn a_deadline_set_after_a_decoder_was_compiled_still_applies_to_it() {
         .with_decoder_deadline(std::time::Duration::from_secs(30));
     let dataset = patient.open(&bytes).expect("the container opens");
     let batches = dataset.scan().expect("the scan runs");
-    assert_eq!(column_values(&batches, 0).len(), ROWS as usize);
+    assert_eq!(column_values(&batches, 0).len(), expected_rows());
 
     assert_eq!(
         runtime.decoders_compiled(),
