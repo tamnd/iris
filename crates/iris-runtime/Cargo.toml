@@ -26,6 +26,7 @@ iris-source.workspace = true
 iris-trust.workspace = true
 iris-vm.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 # iris-trust is here because it owns the one thing that has to happen before a decoder is compiled:
 # hashing the module and comparing it to what the container says. This crate never touches the
@@ -39,6 +40,12 @@ thiserror.workspace = true
 # iris-native carries the table a host registers its own decoder implementations in. This crate is
 # where the lookup happens, because this crate is the one holding the digest that iris-trust checked,
 # and that digest is the only key the lookup is allowed to use.
+
+# tracing is here for one event, written once per scan, saying which of the two implementations ran
+# and under which identities. A library taking a logging facade is a decision worth making once, and
+# this is the case that forces it: whether a batch came from the sandbox or from native code is not
+# answerable from a return value, because the whole point of substitution is that the two return the
+# same thing. The facade costs an embedder nothing when nothing subscribes.
 
 # No dev-dependency on iris-decoder even though the gate test uses it. The test builds it for wasm32
 # by running cargo, not by linking it, and a dev-dependency would build a second copy of it for the
@@ -54,6 +61,12 @@ thiserror.workspace = true
 # without `tokio::net`, which hyper below object_store needs. The loom models are about the memory
 # pool and have nothing to do with object storage, so the fix is to not build the HTTP stack for
 # them rather than to argue with tokio about a flag that was meant for it.
+[dev-dependencies]
+# The other side of the scan event. A test that asserts a library logged something has to subscribe
+# to it, and subscribing is not something the library itself is allowed to do, so the collector
+# arrives here and only here.
+tracing-subscriber.workspace = true
+
 [target.'cfg(not(loom))'.dev-dependencies]
 async-trait.workspace = true
 bytes.workspace = true

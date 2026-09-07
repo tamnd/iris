@@ -61,6 +61,10 @@ fn one_wrong_bit_in_one_value_is_reported_as_the_byte_it_is() {
     struct Skewed;
 
     impl Native for Skewed {
+        fn identity(&self) -> &'static str {
+            "skewed 1.0.0"
+        }
+
         fn handshake(&self, _hello: &Hello) -> Result<Handshake> {
             Ok(fixedwidth_handshake())
         }
@@ -104,6 +108,10 @@ fn an_implementation_that_ignores_the_batch_size_is_caught() {
     struct OneBatch;
 
     impl Native for OneBatch {
+        fn identity(&self) -> &'static str {
+            "onebatch 1.0.0"
+        }
+
         fn handshake(&self, _hello: &Hello) -> Result<Handshake> {
             Ok(fixedwidth_handshake())
         }
@@ -142,6 +150,10 @@ fn an_implementation_that_describes_itself_differently_is_caught() {
     struct Renamed;
 
     impl Native for Renamed {
+        fn identity(&self) -> &'static str {
+            "renamed 1.0.0"
+        }
+
         fn handshake(&self, _hello: &Hello) -> Result<Handshake> {
             Ok(Handshake {
                 decoder_id: "fixedwidth2".to_owned(),
@@ -175,6 +187,10 @@ fn an_implementation_that_refuses_what_the_module_serves_is_caught() {
     struct Fussy;
 
     impl Native for Fussy {
+        fn identity(&self) -> &'static str {
+            "fussy 1.0.0"
+        }
+
         fn handshake(&self, _hello: &Hello) -> Result<Handshake> {
             Ok(fixedwidth_handshake())
         }
