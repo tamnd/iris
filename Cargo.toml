@@ -102,6 +102,12 @@ wasmtime = { version = "48.0.1", default-features = false, features = ["async", 
 
 criterion = "0.8.2"
 insta = "1.48.0"
+# The M6 concurrency gate. It replaces the standard library's threads and locks with models of them
+# and runs a test once per interleaving instead of once, which is the only way to check a handoff
+# between threads that a stress run would have to be unlucky to hit. Reached only under
+# `RUSTFLAGS=--cfg loom` and never through a cargo feature, so nothing resolving anywhere else in
+# the graph can put it in a build somebody ships.
+loom = "0.7.2"
 proptest = "1.11.0"
 tempfile = "3.27.0"
 
