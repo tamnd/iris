@@ -14,9 +14,10 @@ use iris_abi::{
 };
 use iris_format::layout::HEADER_SIZE;
 use iris_format::{Container, Digest, Directory, Placement, SchemaEncoding, Section, SectionKind};
-use iris_source::{RangeSource, Segment, Traffic, read_blocking};
+use iris_native::{Native, Registry};
+use iris_source::{Fetch, RangeSource, Segment, SourceError, Traffic, bounds, read_blocking};
 use iris_trust::{Policy, Verified};
-use iris_vm::{Decoder, Program, Vm};
+use iris_vm::{Decoder, Handshake, Program, RawBatch, Vm};
 
 use crate::assemble::record_batch;
 use crate::error::{Error, Result};
@@ -93,6 +94,13 @@ pub struct Runtime {
     /// compiled module belongs to the engine that compiled it and cannot be instantiated by another
     /// one, so a pool that outlived an engine would be holding code nothing could run.
     decoders: Arc<Pool<Digest, Program>>,
+    /// Decoders this host has its own implementation of, keyed by the digest of the module.
+    ///
+    /// Empty by default, which is every container running in the sandbox. What goes in it is a
+    /// decision an operator makes, in the same way that allowing a decoder from outside the
+    /// container is, and for the same reason: both of them are about running code that did not come
+    /// with the dataset.
+    native: Registry,
 }
 
 impl Runtime {
@@ -110,7 +118,32 @@ impl Runtime {
             max_batch_rows: 8192,
             policy: Policy::embedded_only(),
             decoders: Arc::new(Pool::new(DEFAULT_DECODER_CACHE)),
+            native: Registry::new(),
         })
+    }
+
+    /// Says which decoders this host has its own implementation of.
+    ///
+    /// A decoder in a container is WebAssembly and runs in a sandbox, which is what makes a dataset
+    /// from anywhere readable. It also caps the vector width at 128 bits, so a host that has written
+    /// the same decoder against the machine it is actually running on has something faster and no
+    /// way to use it. This is that way.
+    ///
+    /// The registry is keyed on the digest of the decoder module and on nothing else. The digest
+    /// used to look one up is the one `iris-trust` computed from the module bytes that were present
+    /// in the container, not a name and not anything the container asserts about itself, so a
+    /// dataset cannot reach a native implementation by claiming to be something it is not. A decoder
+    /// whose digest is not in the registry runs in the sandbox whatever it calls itself. See
+    /// [`iris_native::Registry`] for why that is the only key.
+    ///
+    /// Substitution replaces compiling and running the module. It replaces nothing else: the module
+    /// is still hashed and checked, the handshake is still negotiated by the same function, and
+    /// every batch still goes through `iris-guard` and Arrow. [`Dataset::decoder_is_native`] is how
+    /// a host checks from the outside that this happened.
+    #[must_use]
+    pub fn with_native(mut self, native: Registry) -> Self {
+        self.native = native;
+        self
     }
 
     /// Says where this host will accept a decoder from.
@@ -230,7 +263,7 @@ impl Runtime {
         let source = container.section_bytes(data_section(container.directory())?);
 
         Ok(Dataset {
-            program: opened.program,
+            decoding: opened.decoding,
             schema: opened.schema,
             source,
             rows: opened.rows,
@@ -298,7 +331,7 @@ impl Runtime {
         let data = Segment::new(source, at, len)?;
 
         Ok(Windowed {
-            program: opened.program,
+            decoding: opened.decoding,
             schema: opened.schema,
             source: Some(Box::new(data)),
             window_bytes,
@@ -364,15 +397,30 @@ impl Runtime {
         // runtime is willing to wait for and not a property of the compiled module, so two runtimes
         // that disagree about it can still share the compiler's work.
         let digest = verified.digest();
-        let program = self
-            .decoders
-            .get_or_build(&digest, verified.module().len(), || {
-                self.vm.compile(verified.module(), &digest.to_string())
-            })?
-            .with_deadline(self.vm.deadline());
+
+        // The one place a native implementation is chosen, and the digest above is the whole of what
+        // chooses it. It is worth being clear about which digest that is: it came from iris-trust,
+        // which computed it from the module bytes that were actually in the container and compared
+        // it against what the container claims. A dataset that names a digest this host has native
+        // code for, while carrying a module that hashes to something else, was refused several lines
+        // ago. So there is no arrangement of bytes that reaches this branch by asserting anything.
+        //
+        // The name never appears. A registry keyed on the name would hand native code to any dataset
+        // that typed the right string, which is arbitrary code selection by filename, and the reason
+        // that cannot happen here is that `Registry` has no method that takes one.
+        let decoding = match self.native.get(&digest) {
+            Some(native) => Decoding::Native(native),
+            None => Decoding::Wasm(
+                self.decoders
+                    .get_or_build(&digest, verified.module().len(), || {
+                        self.vm.compile(verified.module(), &digest.to_string())
+                    })?
+                    .with_deadline(self.vm.deadline()),
+            ),
+        };
 
         Ok(Opened {
-            program,
+            decoding,
             schema,
             rows: directory.dataset().rows,
             name: directory.dataset().name.clone(),
@@ -381,13 +429,29 @@ impl Runtime {
     }
 }
 
-/// What both open paths have once the metadata has been read and the decoder compiled.
+/// What both open paths have once the metadata has been read and the decoder is ready to run.
 struct Opened {
-    program: Program,
+    decoding: Decoding,
     schema: SchemaRef,
     rows: u64,
     name: String,
     digest: Digest,
+}
+
+/// Which code is going to read this container's rows.
+///
+/// Both arms have already been through the same checks by the time one of them is chosen. The
+/// module was hashed and compared against the container either way, because the hash is what picks
+/// the arm, and everything the two produce is checked the same way afterwards. What differs is only
+/// who does the decoding.
+#[derive(Clone, Debug)]
+enum Decoding {
+    /// The module the container carries, compiled and run in the sandbox. The default and the
+    /// answer for every decoder this host has not been told about.
+    Wasm(Program),
+
+    /// Host code registered against the digest of that module, run in place of it.
+    Native(Arc<dyn Native>),
 }
 
 /// The one section a decoder is shown.
@@ -433,7 +497,7 @@ fn read(source: &mut dyn RangeSource, at: u64, len: usize) -> Result<Vec<u8>> {
 /// costs a fraction of what compiling costs.
 #[derive(Clone, Debug)]
 pub struct Dataset<'a> {
-    program: Program,
+    decoding: Decoding,
     schema: SchemaRef,
     source: &'a [u8],
     rows: u64,
@@ -538,16 +602,37 @@ impl Dataset<'_> {
         count: u64,
         columns: &[u32],
     ) -> Result<Vec<RecordBatch>> {
-        let mut decoder = Decoder::instantiate(&self.program)?;
-        decoder.load_source(self.source)?;
-        blocking(run_async(
-            &mut decoder,
-            &self.hello(),
-            &self.schema,
-            start,
-            count,
-            columns,
-        ))
+        match &self.decoding {
+            Decoding::Wasm(program) => {
+                let mut decoder = Decoder::instantiate(program)?;
+                decoder.load_source(self.source)?;
+                blocking(run_wasm(
+                    &mut decoder,
+                    &self.hello(),
+                    &self.schema,
+                    start,
+                    count,
+                    columns,
+                ))
+            }
+            // Nothing is copied here, which the sandbox path cannot say. Loading the source into a
+            // guest means putting a second copy of the data section inside the guest's memory,
+            // because that is the only place guest code can address. Native code is running in this
+            // process and can read the buffer where it already is, so it is handed a source over the
+            // same bytes rather than a copy of them.
+            Decoding::Native(native) => {
+                let mut source = Resident { bytes: self.source };
+                blocking(run_native(
+                    native.as_ref(),
+                    &mut source,
+                    &self.hello(),
+                    &self.schema,
+                    start,
+                    count,
+                    columns,
+                ))
+            }
+        }
     }
 
     /// What this host and the decoder settled on, without reading a row.
@@ -568,9 +653,29 @@ impl Dataset<'_> {
     /// Returns [`Error::Refused`] if the decoder and this host cannot agree on terms at all, and
     /// [`Error::Vm`] if the decoder trapped during the handshake.
     pub fn capabilities(&self) -> Result<CapabilitySet> {
-        let mut decoder = Decoder::instantiate(&self.program)?;
-        decoder.load_source(self.source)?;
-        Ok(blocking(agree_async(&mut decoder, &self.hello()))?.agreed)
+        match &self.decoding {
+            Decoding::Wasm(program) => {
+                let mut decoder = Decoder::instantiate(program)?;
+                decoder.load_source(self.source)?;
+                Ok(blocking(agree_wasm(&mut decoder, &self.hello()))?.agreed)
+            }
+            Decoding::Native(native) => Ok(agree_native(native.as_ref(), &self.hello())?.agreed),
+        }
+    }
+
+    /// Whether this host ran its own implementation instead of the module in the container.
+    ///
+    /// True only if the digest of that module was in the registry handed to
+    /// [`Runtime::with_native`]. There is no other way for this to be true, which is what makes it
+    /// worth asking: a host that means to be running native code can check that it is, and a host
+    /// that does not want to can check that it is not.
+    ///
+    /// The rows do not depend on the answer. A native implementation that disagrees with the module
+    /// it stands in for is a bug in that implementation, and this is how somebody chasing one finds
+    /// out which of the two ran.
+    #[must_use]
+    pub const fn decoder_is_native(&self) -> bool {
+        matches!(self.decoding, Decoding::Native(_))
     }
 
     fn hello(&self) -> Hello {
@@ -595,7 +700,7 @@ impl Dataset<'_> {
 /// place: reading a range moves a window, counts a request, and in general is not something two
 /// scans can do to the same source at once.
 pub struct Windowed {
-    program: Program,
+    decoding: Decoding,
     schema: SchemaRef,
     source: Option<Box<dyn RangeSource + Send>>,
     window_bytes: u64,
@@ -619,6 +724,7 @@ impl std::fmt::Debug for Windowed {
             .field("source_bytes", &self.source_bytes)
             .field("max_batch_rows", &self.max_batch_rows)
             .field("last_scan", &self.last_scan)
+            .field("native", &self.decoder_is_native())
             .field("attached", &self.source.is_some())
             .finish_non_exhaustive()
     }
@@ -802,21 +908,18 @@ impl Windowed {
         count: u64,
         columns: &[u32],
     ) -> Result<Vec<RecordBatch>> {
-        let mut decoder = Decoder::instantiate(&self.program)?;
-
-        // Nothing is loaded up front, so the guest's resident buffer stays empty and every range
-        // the decoder asks for goes out through `require_range`. The source comes back afterwards
-        // whether or not the scan worked, because a failed scan is not a reason to lose the file.
+        // The source comes back afterwards whether or not the scan worked, because a failed scan is
+        // not a reason to lose the file.
         let source = self.source.take().ok_or(Error::SourceLost)?;
 
-        // Read before the source goes into the guest and again after it comes back, so what is
-        // recorded is this scan and not everything since the file was opened. Opening read a
-        // trailer, a header, a footer and a decoder module, and a caller asking what a scan cost
-        // should not be handed the cost of getting to the point where a scan was possible.
+        // Read before the source is handed over and again after it comes back, so what is recorded
+        // is this scan and not everything since the file was opened. Opening read a trailer, a
+        // header, a footer and a decoder module, and a caller asking what a scan cost should not be
+        // handed the cost of getting to the point where a scan was possible.
         let before = source.traffic();
-        decoder.attach(source);
-        let outcome = run_async(
-            &mut decoder,
+        let (outcome, back) = decode(
+            &self.decoding,
+            source,
             &self.hello(),
             &self.schema,
             start,
@@ -824,7 +927,7 @@ impl Windowed {
             columns,
         )
         .await;
-        self.source = decoder.detach();
+        self.source = back;
 
         // Recorded whether or not the scan worked. A scan that failed part way through still moved
         // whatever it moved, and that is the number somebody looking at the failure wants.
@@ -846,12 +949,35 @@ impl Windowed {
     /// The same as [`Dataset::capabilities`], plus [`Error::SourceLost`] if the source is not
     /// attached.
     pub fn capabilities(&mut self) -> Result<CapabilitySet> {
-        let mut decoder = Decoder::instantiate(&self.program)?;
-        let source = self.source.take().ok_or(Error::SourceLost)?;
-        decoder.attach(source);
-        let agreed = blocking(agree_async(&mut decoder, &self.hello()));
-        self.source = decoder.detach();
-        Ok(agreed?.agreed)
+        match &self.decoding {
+            Decoding::Wasm(program) => {
+                let mut decoder = Decoder::instantiate(program)?;
+                let source = self.source.take().ok_or(Error::SourceLost)?;
+                decoder.attach(source);
+                let agreed = blocking(agree_wasm(&mut decoder, &self.hello()));
+                self.source = decoder.detach();
+                Ok(agreed?.agreed)
+            }
+            // The source is not taken here, and it is checked for anyway. A native implementation
+            // shakes hands without reading a byte, so this could answer with the source still
+            // attached, and then a dataset whose source was lost to a panicking scan would report
+            // capabilities happily and fail at the first scan. Answering the same way on both paths
+            // is worth more than saving a check.
+            Decoding::Native(native) => {
+                if self.source.is_none() {
+                    return Err(Error::SourceLost);
+                }
+                Ok(agree_native(native.as_ref(), &self.hello())?.agreed)
+            }
+        }
+    }
+
+    /// Whether this host ran its own implementation instead of the module in the container.
+    ///
+    /// See [`Dataset::decoder_is_native`], which answers the same question about the other path.
+    #[must_use]
+    pub const fn decoder_is_native(&self) -> bool {
+        matches!(self.decoding, Decoding::Native(_))
     }
 
     fn hello(&self) -> Hello {
@@ -866,12 +992,6 @@ impl Windowed {
     }
 }
 
-/// Shakes hands, scans, and turns what comes back into record batches.
-///
-/// Both open paths end here, and the only thing that differs between them is the [`Hello`] they
-/// bring. That is the claim M4 makes, written as one function rather than as a sentence: a decoder
-/// handed a resident buffer and the same decoder pulling ranges out of a file it cannot hold are
-/// running the same host code.
 /// Runs a scan to the end on a thread that has agreed to sit there.
 ///
 /// Every synchronous entry point in this module is one of the asynchronous ones driven by this, so
@@ -895,7 +1015,68 @@ fn blocking<T>(call: impl Future<Output = T>) -> T {
     }
 }
 
-async fn run_async(
+/// Runs a windowed scan on whichever decoder the dataset opened with, and gives the source back.
+///
+/// The source is passed in and returned rather than borrowed, because the sandbox path does not
+/// borrow it: a source goes into the guest's store for the duration of a scan and comes out again
+/// afterwards. Returning it alongside the outcome is what makes losing it on a failure impossible to
+/// write, since there is no way out of here that does not carry it.
+///
+/// It takes the four things it needs rather than a `&Windowed`, which is not a style preference. A
+/// future holding a `&Windowed` across an await is `Send` only if `Windowed` is `Sync`, and a
+/// `Windowed` owns a `Box<dyn RangeSource + Send>` and is deliberately not `Sync`, because a source
+/// is a position and two threads reading one at once is not a thing any of the implementations
+/// promise to survive. So a scan future that borrowed the dataset could not be spawned, which is the
+/// whole point of there being an asynchronous scan.
+async fn decode(
+    decoding: &Decoding,
+    source: Box<dyn RangeSource + Send>,
+    hello: &Hello,
+    schema: &SchemaRef,
+    start: u64,
+    count: u64,
+    columns: &[u32],
+) -> (
+    Result<Vec<RecordBatch>>,
+    Option<Box<dyn RangeSource + Send>>,
+) {
+    match decoding {
+        Decoding::Wasm(program) => {
+            let mut decoder = match Decoder::instantiate(program) {
+                Ok(decoder) => decoder,
+                Err(err) => return (Err(err.into()), Some(source)),
+            };
+
+            // Nothing is loaded up front, so the guest's resident buffer stays empty and every range
+            // the decoder asks for goes out through `require_range`.
+            decoder.attach(source);
+            let outcome = run_wasm(&mut decoder, hello, schema, start, count, columns).await;
+            (outcome, decoder.detach())
+        }
+        Decoding::Native(native) => {
+            let mut source = source;
+            let outcome = run_native(
+                native.as_ref(),
+                source.as_mut(),
+                hello,
+                schema,
+                start,
+                count,
+                columns,
+            )
+            .await;
+            (outcome, Some(source))
+        }
+    }
+}
+
+/// Shakes hands with the decoder in the container, scans, and turns what comes back into batches.
+///
+/// Both open paths end here, and the only thing that differs between them is the [`Hello`] they
+/// bring. That is the claim M4 makes, written as one function rather than as a sentence: a decoder
+/// handed a resident buffer and the same decoder pulling ranges out of a file it cannot hold are
+/// running the same host code.
+async fn run_wasm(
     decoder: &mut Decoder,
     hello: &Hello,
     schema: &SchemaRef,
@@ -903,60 +1084,130 @@ async fn run_async(
     count: u64,
     columns: &[u32],
 ) -> Result<Vec<RecordBatch>> {
-    let agreement = agree_async(decoder, hello).await?;
+    let agreement = agree_wasm(decoder, hello).await?;
+    let plan = plan(schema, agreement.agreed, columns)?;
+    let request = plan.request(start, count)?;
+    let raw = decoder
+        .scan(&record(|w| request.encode(w))?)
+        .finish()
+        .await?;
+    assemble(&plan.projected, &raw)
+}
 
-    // Checked before anything is asked for rather than after something comes back. A decoder that
-    // never mentioned projection will read every column whatever it is sent, and the batches it
-    // produces would then be assembled against a schema of three fields with forty arrays in hand.
-    // That is a `Shape` error naming a count, which sends whoever reads it looking for a bug in the
-    // decoder rather than at the one line of theirs that asked for something the decoder cannot do.
-    if !columns.is_empty() && !agreement.agreed.contains(Capability::PROJECTION) {
+/// The same scan, run by host code registered against this decoder's digest.
+///
+/// Everything either side of the decoding is the function the sandbox path calls. The terms are
+/// negotiated by `negotiate`, the projection is checked by [`plan`], and the batches are checked by
+/// [`assemble`], which is `iris-guard` and then Arrow. That is the point of writing it this way
+/// rather than letting a native implementation return record batches directly: a native kernel is
+/// substituted for a decoder, not for the host, and it is held to the same account.
+async fn run_native(
+    native: &dyn Native,
+    source: &mut (dyn RangeSource + Send),
+    hello: &Hello,
+    schema: &SchemaRef,
+    start: u64,
+    count: u64,
+    columns: &[u32],
+) -> Result<Vec<RecordBatch>> {
+    let agreement = agree_native(native, hello)?;
+    let plan = plan(schema, agreement.agreed, columns)?;
+    let request = plan.request(start, count)?;
+    let raw = native.scan(&request, source).await?;
+    assemble(&plan.projected, &raw)
+}
+
+/// What a scan settles before it asks for a row.
+struct Plan {
+    /// The schema the batches will carry, which is the projected one.
+    projected: SchemaRef,
+    /// The columns wanted, encoded the way the ABI wants them.
+    indices: Vec<u8>,
+}
+
+impl Plan {
+    /// The request to send, which is the same request whichever side is going to serve it.
+    fn request(&self, start: u64, count: u64) -> Result<ScanRequest<'_>> {
+        Ok(ScanRequest {
+            row_start: start,
+            row_count: count,
+            projection: Projection::from_bytes(&self.indices)?,
+            ..ScanRequest::everything()
+        })
+    }
+}
+
+/// Checks that the scan being asked for is one the decoder agreed to serve, and works out its shape.
+///
+/// The projection check is before anything is asked for rather than after something comes back. A
+/// decoder that never mentioned projection will read every column whatever it is sent, and the
+/// batches it produces would then be assembled against a schema of three fields with forty arrays in
+/// hand. That is a `Shape` error naming a count, which sends whoever reads it looking for a bug in
+/// the decoder rather than at the one line of theirs that asked for something the decoder cannot do.
+fn plan(schema: &SchemaRef, agreed: CapabilitySet, columns: &[u32]) -> Result<Plan> {
+    if !columns.is_empty() && !agreed.contains(Capability::PROJECTION) {
         return Err(Error::refused(&Refusal::new(
             RefusalReason::MISSING_CAPABILITY,
             "this scan names columns and the decoder did not agree to projection, so it would              read every column and the batches would not match what was asked for",
         )));
     }
+    Ok(Plan {
+        projected: project(schema, columns)?,
+        indices: columns.iter().flat_map(|c| c.to_le_bytes()).collect(),
+    })
+}
 
-    let projected = project(schema, columns)?;
-    let indices: Vec<u8> = columns.iter().flat_map(|c| c.to_le_bytes()).collect();
-    let request = ScanRequest {
-        row_start: start,
-        row_count: count,
-        projection: Projection::from_bytes(&indices)?,
-        ..ScanRequest::everything()
-    };
-    let raw = decoder
-        .scan(&record(|w| request.encode(w))?)
-        .finish()
-        .await?;
-
+/// Turns what a decoder produced into record batches, checking every one of them on the way.
+///
+/// One function for both paths, and it is the one that matters most for being shared. A native
+/// implementation is host code with no sandbox around it, so the temptation is to trust its output
+/// because it is ours, and the answer to that is that the arrays it produced are still described by
+/// numbers and the numbers are still checked. `record_batch` is the guard and then Arrow, and it is
+/// what runs here.
+fn assemble(projected: &SchemaRef, raw: &[RawBatch]) -> Result<Vec<RecordBatch>> {
     let mut batches = Vec::with_capacity(raw.len());
-    for batch in &raw {
+    for batch in raw {
         // An empty batch is how a decoder says there are no more rows. It has no arrays, so
         // there is nothing to assemble and nothing to check against the schema.
         if batch.rows == 0 && batch.nodes.is_empty() {
             continue;
         }
-        batches.push(record_batch(&projected, batch)?);
+        batches.push(record_batch(projected, batch)?);
     }
     Ok(batches)
 }
 
-/// Shakes hands, and hands back what the two sides settled on.
-///
-/// The decoder has already said yes by the time the ack is built, and the negotiation is the host
-/// saying yes back. Both sides check, because a decoder that agrees to terms it cannot meet and a
-/// host that runs a decoder it cannot serve are different bugs and only one of them is ours.
+/// Shakes hands with a decoder in the sandbox, and hands back what the two sides settled on.
 ///
 /// Awaited rather than waited on, even though a handshake asks nothing of the source, because a
 /// decoder is allowed to read a footer in order to know its own shape and this is a call into guest
 /// code like any other. A decoder that does that on a source over a network would otherwise hold a
 /// worker for a round trip before the scan had started.
-async fn agree_async(decoder: &mut Decoder, hello: &Hello) -> Result<Agreement> {
+async fn agree_wasm(decoder: &mut Decoder, hello: &Hello) -> Result<Agreement> {
     let handshake = decoder
         .start(&record(|w| hello.encode(w))?)
         .finish()
         .await?;
+    agree(hello, &handshake)
+}
+
+/// Shakes hands with a native implementation.
+///
+/// Not asynchronous, because there is no guest to park and nothing to read: a native implementation
+/// answers out of what it already knows. It goes through the same [`agree`] afterwards, so an
+/// implementation that claims a capability this host did not offer is refused in exactly the way a
+/// guest making the same claim would be.
+fn agree_native(native: &dyn Native, hello: &Hello) -> Result<Agreement> {
+    agree(hello, &native.handshake(hello)?)
+}
+
+/// The negotiation, which is the same on both paths because it is about the terms and not about who
+/// is going to honour them.
+///
+/// The decoder has already said yes by the time the ack is built, and this is the host saying yes
+/// back. Both sides check, because a decoder that agrees to terms it cannot meet and a host that
+/// runs a decoder it cannot serve are different bugs and only one of them is ours.
+fn agree(hello: &Hello, handshake: &Handshake) -> Result<Agreement> {
     let ack = HelloAck {
         abi_major: handshake.abi_major,
         abi_minor: handshake.abi_minor,
@@ -965,6 +1216,37 @@ async fn agree_async(decoder: &mut Decoder, hello: &Hello) -> Result<Agreement> 
         decoder_id: &handshake.decoder_id,
     };
     negotiate(hello, &ack).map_err(|refusal| Error::refused(&refusal))
+}
+
+/// A [`RangeSource`] over bytes this host is already holding.
+///
+/// `iris_source::MemorySource` is the same idea and takes `Bytes`, which means copying the data
+/// section in order to hand a native implementation a view of bytes it could already see. The whole
+/// reason the resident path is the fast one is that nothing is copied, so it gets its own dozen
+/// lines instead.
+///
+/// Nothing here is ever pending and nothing here counts, both for the reason `MemorySource` gives:
+/// whoever produced this buffer paid for it before iris was handed the result.
+struct Resident<'a> {
+    bytes: &'a [u8],
+}
+
+impl RangeSource for Resident<'_> {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn range(&mut self, at: u64, len: usize) -> std::result::Result<Fetch<'_>, SourceError> {
+        bounds(at, len, self.len())?;
+
+        // The bounds check passed, so `at` is at most the buffer length and both conversions fit.
+        let start = usize::try_from(at).unwrap_or(usize::MAX);
+        Ok(Fetch::Ready(&self.bytes[start..start + len]))
+    }
+
+    fn traffic(&self) -> Traffic {
+        Traffic::NONE
+    }
 }
 
 /// The schema the batches of a projected scan carry.

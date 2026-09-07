@@ -131,6 +131,29 @@
 //! that matters on a pool of a fixed size: a query with more outstanding round trips than workers
 //! still makes progress on all of them.
 //!
+//! # Skipping the sandbox, and what it takes to be allowed to
+//!
+//! A decoder runs in a sandbox and the sandbox costs something. The WebAssembly vector width is
+//! capped at 128 bits, so a decoder that would use the full width of the machine it is running on
+//! cannot, and a host that has written the same decoder in native code has something faster with no
+//! way to reach it. [`Runtime::with_native`] is the way to reach it, and
+//! [`Dataset::decoder_is_native`] is how a host checks that it worked.
+//!
+//! What makes that safe is the key. The table is keyed on the digest of the decoder module and there
+//! is no method on it that takes a name, because a name is chosen by whoever wrote the container. A
+//! table keyed on the name would hand native code, running in this process with nothing around it,
+//! to any dataset that typed the right string. The digest used for the lookup is the one
+//! `iris-trust` computed from the module bytes that were in the container, so a dataset that names a
+//! known digest while carrying different bytes has already been refused by the time the lookup
+//! happens, and a dataset whose digest is not in the table gets the sandbox no matter what it calls
+//! its decoder.
+//!
+//! Substitution replaces compiling and instantiating, and nothing else. The module is still read and
+//! still hashed, the handshake is still negotiated by the same function, the projection is still
+//! checked before a row is asked for, and every batch still goes through `iris-guard` and then
+//! Arrow. Native code producing an array that does not describe itself honestly is refused exactly
+//! as a guest would be.
+//!
 //! # What it does not do yet
 //!
 //! Nothing here reads ahead on its own. A source handed to [`Runtime::open_windowed`] is used
@@ -213,6 +236,13 @@ pub use iris_trust::{Policy, Resolve, Untrusted};
 /// caller asking whether it may push a projection down is holding one of these, and it should not
 /// have to depend on iris-abi to name the bit it is testing.
 pub use iris_abi::{Capability, CapabilitySet};
+
+/// Native implementations of decoders this host recognises, and the table they go in.
+///
+/// Re-exported because [`Runtime::with_native`] takes a [`Registry`] and writing something to put in
+/// one means implementing [`Native`]. A host that has gone to the trouble of rewriting a decoder
+/// should not also have to work out which crate the trait lives in.
+pub use iris_native::{Native, Registry, Scanning};
 
 /// The identity of a decoder, which is the hash of its bytes and nothing else.
 ///

@@ -14,7 +14,13 @@ readme = "README.md"
 
 [dependencies]
 iris-abi.workspace = true
-iris-trust.workspace = true
+iris-format.workspace = true
+iris-source.workspace = true
+# For `RawBatch` and `Handshake`, which are the currency a native implementation deals in. Sharing
+# those types rather than defining a parallel pair is what makes a differential run between a native
+# kernel and the module it stands in for a comparison rather than a translation.
+iris-vm.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

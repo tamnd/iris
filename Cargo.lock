@@ -2232,7 +2232,10 @@ name = "iris-native"
 version = "0.7.0"
 dependencies = [
  "iris-abi",
- "iris-trust",
+ "iris-format",
+ "iris-source",
+ "iris-vm",
+ "thiserror",
 ]
 
 [[package]]
@@ -2250,6 +2253,7 @@ dependencies = [
  "iris-abi",
  "iris-format",
  "iris-guard",
+ "iris-native",
  "iris-source",
  "iris-trust",
  "iris-vm",

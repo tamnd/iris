@@ -21,6 +21,7 @@ arrow-schema.workspace = true
 iris-abi.workspace = true
 iris-format.workspace = true
 iris-guard.workspace = true
+iris-native.workspace = true
 iris-source.workspace = true
 iris-trust.workspace = true
 iris-vm.workspace = true
@@ -35,8 +36,9 @@ thiserror.workspace = true
 # `RangeSource`, and the section the decoder sees is a `Segment` over it, so this crate names the
 # trait even though it implements none of it.
 
-# iris-native is not here yet. It is still a stub, and depending on a crate before it does anything
-# makes the dependency graph say something that is not true.
+# iris-native carries the table a host registers its own decoder implementations in. This crate is
+# where the lookup happens, because this crate is the one holding the digest that iris-trust checked,
+# and that digest is the only key the lookup is allowed to use.
 
 # No dev-dependency on iris-decoder even though the gate test uses it. The test builds it for wasm32
 # by running cargo, not by linking it, and a dev-dependency would build a second copy of it for the

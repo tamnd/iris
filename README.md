@@ -35,15 +35,15 @@ Every performance claim here is settled in [`tamnd/iris-bench`](https://github.c
 | `iris-vm` | The WebAssembly execution layer over Wasmtime. Instantiation, metering, the window. |
 | `iris-source` | `RangeSource` and its implementations: file, mapped file, object store. |
 | `iris-guard` | Structural validation of Arrow arrays crossing the sandbox boundary. |
-| `iris-trust` | Decoder identity, content hashes, signature policy, the native substitution table. |
+| `iris-trust` | Decoder identity, content hashes, and where a host will accept a decoder from. |
 | `iris-runtime` | The thing an engine embeds. Ties the above together into a scan. |
-| `iris-native` | Hash-keyed native implementations of decoders the host already knows. |
+| `iris-native` | The substitution table. Native implementations of decoders the host already knows, keyed on the digest of the module and on nothing else. |
 | `iris-df` | A DataFusion table provider. Registers a container as a table and pushes projections into it. |
 | `irisdb` | The command line tool: inspect, verify, decode, bundle. Installs a binary called `iris`. |
 
 Every crate is `iris-something` except the command line tool, which is `irisdb` on crates.io because the bare name is on the registry's reserved list. `cargo install irisdb` gives you a binary called `iris`.
 
-The DataFusion integration is `iris-df`. The others (DuckDB, a C ABI, and Python bindings) are planned and are not in this tree yet. They arrive at M7.
+The DataFusion integration is `iris-df`. The others (DuckDB, a C ABI, and Python bindings) are planned and are not in this tree yet. They arrive at M8.
 
 ## Building
 
