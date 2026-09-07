@@ -17,6 +17,7 @@ use iris_vm::{Decoder, Program, Vm};
 
 use crate::assemble::record_batch;
 use crate::error::{Error, Result};
+use crate::pool::Pool;
 use crate::schema::{describe, schema_from_ipc};
 
 /// The largest record this host will build for a decoder.
@@ -24,6 +25,22 @@ use crate::schema::{describe, schema_from_ipc};
 /// A `Hello` and a `ScanRequest` are both small and neither grows with the data, so this is a bound
 /// on a mistake rather than a bound on a workload.
 const RECORD_LIMIT: usize = 1 << 20;
+
+/// How much decoder this host keeps compiled at once, by default.
+///
+/// Weighed in module bytes and not in compiled bytes, which is a proxy and is worth being plain
+/// about. Wasmtime does not offer the size of what it produced without serialising it, and
+/// serialising a module in order to find out how big it is costs more than the number is worth. What
+/// a module compiles to is some multiple of what it was, the multiple is a property of the engine
+/// rather than of the decoder, so weighing the input orders entries the same way weighing the output
+/// would and the budget is in the wrong units by a constant.
+///
+/// Thirty two mebibytes of module is a lot of decoders. One is tens to hundreds of kibibytes, so
+/// this is a bound on a host that opens containers written by hundreds of different decoders rather
+/// than a limit anything ordinary reaches. A host that knows better sets its own with
+/// [`Runtime::with_decoder_cache_bytes`], and the honest way to pick the number is to measure the
+/// process rather than to derive it from this one.
+const DEFAULT_DECODER_CACHE: usize = 32 * 1024 * 1024;
 
 /// What this host can do when it holds the whole container.
 ///
@@ -49,15 +66,30 @@ const OFFERED_WINDOWED: CapabilitySet = OFFERED
     .with(Capability::REQUIRE_RANGE)
     .with(Capability::SLIDING_WINDOW);
 
-/// A compiler, and the terms this host offers a decoder.
+/// A compiler, the decoders it has already compiled, and the terms this host offers one.
 ///
-/// One of these is meant to be shared and reused. It holds the Wasmtime engine, which is expensive
-/// to build and caches across every module it compiles.
+/// One of these is meant to be shared and reused, and sharing one is worth more than it looks.
+/// It holds the Wasmtime engine, which is expensive to build and caches across every module it
+/// compiles, and it holds the compiled decoders themselves, which is what stops a query that opens
+/// the same container from eight partitions compiling the same code eight times. Cloning it shares
+/// both: a clone is a handle to the same engine and the same pool, not a second copy of either.
 #[derive(Clone, Debug)]
 pub struct Runtime {
     vm: Vm,
     max_batch_rows: u64,
     policy: Policy,
+    /// Compiled decoders, keyed by the hash of the bytes they were compiled from.
+    ///
+    /// The digest is the whole key and it is enough to be the whole key. It was checked against the
+    /// module before anything compiled it, so two containers that name the same digest carry the
+    /// same bytes and there is no version of this where they compile to different code. What is not
+    /// in the key is the deadline, because that is not a property of the compiled module: a program
+    /// that comes out of here is restamped with this runtime's deadline on the way past.
+    ///
+    /// Nothing is shared between two runtimes built separately, and that is not an oversight. A
+    /// compiled module belongs to the engine that compiled it and cannot be instantiated by another
+    /// one, so a pool that outlived an engine would be holding code nothing could run.
+    decoders: Arc<Pool<Digest, Program>>,
 }
 
 impl Runtime {
@@ -74,6 +106,7 @@ impl Runtime {
             vm: Vm::new()?,
             max_batch_rows: 8192,
             policy: Policy::embedded_only(),
+            decoders: Arc::new(Pool::new(DEFAULT_DECODER_CACHE)),
         })
     }
 
@@ -108,6 +141,51 @@ impl Runtime {
     pub fn with_decoder_deadline(mut self, deadline: Duration) -> Self {
         self.vm = self.vm.with_deadline(deadline);
         self
+    }
+
+    /// Sets how much decoder this host keeps compiled at once.
+    ///
+    /// Compiled decoders are memory, and a host that keeps every one it has ever seen has a leak
+    /// with a cache in front of it. The number is in module bytes rather than compiled bytes, for
+    /// the reason given where the default is defined, and zero is the way to say no sharing at all:
+    /// nothing fits in a budget of nothing, so every open compiles.
+    ///
+    /// This starts a fresh and empty pool rather than resizing the one in hand, so a clone taken
+    /// before it keeps the pool it was cloned with. That is the same rule
+    /// [`Runtime::with_decoder_deadline`] follows, and it is what makes a runtime something a host
+    /// configures once and then shares rather than something two threads can reconfigure underneath
+    /// each other.
+    #[must_use]
+    pub fn with_decoder_cache_bytes(mut self, bytes: usize) -> Self {
+        self.decoders = Arc::new(Pool::new(bytes));
+        self
+    }
+
+    /// How many decoders this runtime has compiled since the pool it holds was made.
+    ///
+    /// The number that says whether sharing is working. Eight partitions opening one container move
+    /// it by one, and a host that sees it climbing with the query count is a host whose runtime is
+    /// being rebuilt rather than shared.
+    #[must_use]
+    pub fn decoders_compiled(&self) -> u64 {
+        self.decoders.builds()
+    }
+
+    /// How many compiled decoders are held right now.
+    #[must_use]
+    pub fn decoders_cached(&self) -> usize {
+        self.decoders.entries()
+    }
+
+    /// How much of the budget those decoders are using.
+    ///
+    /// In the same module bytes the budget is set in, which is a proxy for the compiled code and is
+    /// described where the default is defined. A host watching this sit at the budget is a host that
+    /// is throwing decoders away and compiling them again, which is worth either more budget or
+    /// fewer decoders.
+    #[must_use]
+    pub fn decoders_cached_bytes(&self) -> usize {
+        self.decoders.held()
     }
 
     /// Sets the largest batch this host will ask for.
@@ -272,16 +350,30 @@ impl Runtime {
         // The digest goes with the module, so that a decoder that traps or runs away is named in the
         // error by the one identity it did not choose for itself. The name in the container is what
         // the decoder calls itself, and a decoder that has been swapped would still be called that.
+        //
+        // It is also the key, and the pool is what stops a scan split across partitions compiling
+        // one decoder once per partition. A hit hands back a module somebody else compiled, which is
+        // sound for exactly the reason the digest is worth having: these bytes hashed to this value
+        // and were checked against the container before the first compile, so a second container
+        // naming the same digest carries the same code.
+        //
+        // The deadline is put on afterwards rather than being part of the key. It is what this
+        // runtime is willing to wait for and not a property of the compiled module, so two runtimes
+        // that disagree about it can still share the compiler's work.
+        let digest = verified.digest();
         let program = self
-            .vm
-            .compile(verified.module(), &verified.digest().to_string())?;
+            .decoders
+            .get_or_build(&digest, verified.module().len(), || {
+                self.vm.compile(verified.module(), &digest.to_string())
+            })?
+            .with_deadline(self.vm.deadline());
 
         Ok(Opened {
             program,
             schema,
             rows: directory.dataset().rows,
             name: directory.dataset().name.clone(),
-            digest: verified.digest(),
+            digest,
         })
     }
 }
