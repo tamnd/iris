@@ -56,7 +56,10 @@ const DEFAULT_DECODER_CACHE: usize = 32 * 1024 * 1024;
 /// the ABI rather than part of a host, but this path attaches nothing to serve it, so a decoder that
 /// needs to pull its own bytes has to be told that it is in the wrong place. Finding that out during
 /// the handshake is much better than finding it out from the first range that fails.
-const OFFERED: CapabilitySet = CapabilitySet::new()
+///
+/// Public because a native kernel has to be proved under the terms it will be run under, and these
+/// are the terms. See [`iris_native::Differential::offering`].
+pub const RESIDENT_TERMS: CapabilitySet = CapabilitySet::new()
     .with(Capability::RANDOM_ACCESS)
     .with(Capability::PROJECTION);
 
@@ -66,7 +69,11 @@ const OFFERED: CapabilitySet = CapabilitySet::new()
 /// says the decoder may ask for bytes it was not given, and `sliding-window` says it will not be
 /// given all of them at once, which is the same thing the non zero `window_bytes` in the handshake
 /// says and is here so that a decoder can refuse on a bit rather than on a number.
-const OFFERED_WINDOWED: CapabilitySet = OFFERED
+///
+/// Public for the same reason [`RESIDENT_TERMS`] is. A kernel proved under one of the two is
+/// substituted on that open path and not on the other, since the other one is terms nobody compared
+/// it under.
+pub const WINDOWED_TERMS: CapabilitySet = RESIDENT_TERMS
     .with(Capability::REQUIRE_RANGE)
     .with(Capability::SLIDING_WINDOW);
 
@@ -259,7 +266,7 @@ impl Runtime {
         // which is the whole design: there is no flag here to turn off, and adding one would mean
         // adding a function to another crate first.
         let verified = self.policy.decoder(&container)?;
-        let opened = self.prepare(container.directory(), &verified)?;
+        let opened = self.prepare(container.directory(), &verified, RESIDENT_TERMS)?;
         let source = container.section_bytes(data_section(container.directory())?);
 
         Ok(Dataset {
@@ -321,7 +328,7 @@ impl Runtime {
         };
         let record = directory.decoder().ok_or(iris_trust::Untrusted::Missing)?;
         let verified = self.policy.decoder_read(record, embedded)?;
-        let opened = self.prepare(&directory, &verified)?;
+        let opened = self.prepare(&directory, &verified, WINDOWED_TERMS)?;
 
         let section = data_section(&directory)?;
         let (at, len) = (section.offset, section.len);
@@ -348,7 +355,12 @@ impl Runtime {
     ///
     /// It is one function because the checks and the order they happen in are the interesting part,
     /// and two copies of an ordering is two orderings waiting to drift.
-    fn prepare(&self, directory: &Directory<'_>, verified: &Verified<'_>) -> Result<Opened> {
+    fn prepare(
+        &self,
+        directory: &Directory<'_>,
+        verified: &Verified<'_>,
+        offered: CapabilitySet,
+    ) -> Result<Opened> {
         let decoder = verified.record();
         let schema = match directory.schema() {
             Some(schema) if schema.encoding == SchemaEncoding::ArrowIpc => {
@@ -408,7 +420,13 @@ impl Runtime {
         // The name never appears. A registry keyed on the name would hand native code to any dataset
         // that typed the right string, which is arbitrary code selection by filename, and the reason
         // that cannot happen here is that `Registry` has no method that takes one.
-        let decoding = match self.native.get(&digest) {
+        //
+        // The terms this path offers are part of the lookup, because a kernel is proved under terms
+        // and not outright. A kernel that was never compared against the module with projection on
+        // offer is not substituted on a path that offers projection, and the container goes to the
+        // sandbox instead. That is the direction to fail in: adding a capability to what this host
+        // offers costs substitution until somebody runs the differential again.
+        let decoding = match self.native.get(&digest, offered) {
             Some(native) => Decoding::Native(native),
             None => Decoding::Wasm(
                 self.decoders
@@ -687,7 +705,7 @@ impl Dataset<'_> {
             // and no decoder changes between the two.
             window_bytes: 0,
             max_batch_rows: self.max_batch_rows,
-            offered: OFFERED,
+            offered: RESIDENT_TERMS,
             source_bytes: self.source.len() as u64,
         }
     }
@@ -986,7 +1004,7 @@ impl Windowed {
             abi_minor: ABI_MINOR,
             window_bytes: self.window_bytes,
             max_batch_rows: self.max_batch_rows,
-            offered: OFFERED_WINDOWED,
+            offered: WINDOWED_TERMS,
             source_bytes: self.source_bytes,
         }
     }
@@ -1113,7 +1131,7 @@ async fn run_native(
     let agreement = agree_native(native, hello)?;
     let plan = plan(schema, agreement.agreed, columns)?;
     let request = plan.request(start, count)?;
-    let raw = native.scan(&request, source).await?;
+    let raw = native.scan(hello, &request, source).await?;
     assemble(&plan.projected, &raw)
 }
 

@@ -37,7 +37,7 @@ Every performance claim here is settled in [`tamnd/iris-bench`](https://github.c
 | `iris-guard` | Structural validation of Arrow arrays crossing the sandbox boundary. |
 | `iris-trust` | Decoder identity, content hashes, and where a host will accept a decoder from. |
 | `iris-runtime` | The thing an engine embeds. Ties the above together into a scan. |
-| `iris-native` | The substitution table. Native implementations of decoders the host already knows, keyed on the digest of the module and on nothing else. |
+| `iris-native` | The substitution table, and the differential run that is the only way into it. Native implementations of decoders the host already knows, keyed on the digest of the module and on nothing else, and admitted only after being compared to that module byte for byte. |
 | `iris-df` | A DataFusion table provider. Registers a container as a table and pushes projections into it. |
 | `irisdb` | The command line tool: inspect, verify, decode, bundle. Installs a binary called `iris`. |
 

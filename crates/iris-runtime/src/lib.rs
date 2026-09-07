@@ -154,6 +154,14 @@
 //! Arrow. Native code producing an array that does not describe itself honestly is refused exactly
 //! as a guest would be.
 //!
+//! The other half of being allowed to is proving it. A native implementation only reaches a
+//! [`Registry`] as a [`Kernel`], and the only thing that makes a [`Kernel`] is a [`Differential`]
+//! run: both implementations over the same datasets, compared down to the byte. There is no other
+//! constructor, so a host that registers an unproved implementation does not compile. The terms are
+//! part of what is proved, which is why [`RESIDENT_TERMS`] and [`WINDOWED_TERMS`] are public: a
+//! kernel proved under one of them is substituted on that open path, and a host offering anything
+//! else gets the sandbox rather than code nobody compared under those terms.
+//!
 //! # What it does not do yet
 //!
 //! Nothing here reads ahead on its own. A source handed to [`Runtime::open_windowed`] is used
@@ -180,7 +188,7 @@ mod error;
 mod pool;
 mod schema;
 
-pub use dataset::{Dataset, Runtime, Windowed};
+pub use dataset::{Dataset, RESIDENT_TERMS, Runtime, WINDOWED_TERMS, Windowed};
 pub use error::{Error, Result};
 pub use schema::{schema_from_ipc, schema_to_ipc};
 
@@ -237,12 +245,13 @@ pub use iris_trust::{Policy, Resolve, Untrusted};
 /// have to depend on iris-abi to name the bit it is testing.
 pub use iris_abi::{Capability, CapabilitySet};
 
-/// Native implementations of decoders this host recognises, and the table they go in.
+/// Native implementations of decoders this host recognises, and what it takes to register one.
 ///
 /// Re-exported because [`Runtime::with_native`] takes a [`Registry`] and writing something to put in
-/// one means implementing [`Native`]. A host that has gone to the trouble of rewriting a decoder
-/// should not also have to work out which crate the trait lives in.
-pub use iris_native::{Native, Registry, Scanning};
+/// one means implementing [`Native`], proving it with a [`Differential`] over a [`Corpus`], and
+/// registering the [`Kernel`] that comes out. A host that has gone to the trouble of rewriting a
+/// decoder should not also have to work out which crate each of those lives in.
+pub use iris_native::{Case, Corpus, Differential, Kernel, Mismatch, Native, Registry, Scanning};
 
 /// The identity of a decoder, which is the hash of its bytes and nothing else.
 ///

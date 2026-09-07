@@ -8,7 +8,10 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use iris_native::Registry;
+//!
+//! use iris_abi::{Capability, CapabilitySet};
+//! use iris_native::{Case, Corpus, Differential, Registry};
+//! use iris_vm::Vm;
 //! # use iris_abi::{Hello, ScanRequest};
 //! # use iris_source::RangeSource;
 //! # use iris_vm::Handshake;
@@ -16,14 +19,30 @@
 //! # struct Mine;
 //! # impl iris_native::Native for Mine {
 //! #     fn handshake(&self, _: &Hello) -> iris_native::Result<Handshake> { unimplemented!() }
-//! #     fn scan<'a>(&'a self, _: &'a ScanRequest<'a>, _: &'a mut (dyn RangeSource + Send))
-//! #         -> iris_native::Scanning<'a> { unimplemented!() }
+//! #     fn scan<'a>(&'a self, _: &'a Hello, _: &'a ScanRequest<'a>,
+//! #         _: &'a mut (dyn RangeSource + Send)) -> iris_native::Scanning<'a> { unimplemented!() }
 //! # }
+//! let vm = Vm::new()?;
 //! let module = std::fs::read("fixedwidth.wasm")?;
-//! let registry = Registry::new().with_module(&module, Arc::new(Mine));
 //!
-//! // A container carrying exactly those bytes now runs `Mine`. A container carrying any other
-//! // bytes runs in the sandbox, whatever it calls its decoder.
+//! // The datasets the two implementations have to agree about, byte for byte.
+//! let corpus = Corpus::new().with_case(Case::new(
+//!     "readings",
+//!     std::fs::read("readings.bin")?,
+//!     1_000,
+//!     3,
+//! ));
+//!
+//! let terms = CapabilitySet::new()
+//!     .with(Capability::RANDOM_ACCESS)
+//!     .with(Capability::PROJECTION);
+//! let kernel = Differential::new(&vm, &module)
+//!     .offering(terms)
+//!     .verify(Arc::new(Mine), &corpus)?;
+//! let registry = Registry::new().with(kernel);
+//!
+//! // A container carrying exactly those module bytes now runs `Mine`. A container carrying any
+//! // other bytes runs in the sandbox, whatever it calls its decoder.
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -42,6 +61,22 @@
 //! itself, and that is a property of the shape of [`Registry`] rather than of anybody remembering to
 //! check.
 //!
+//! # Recognising is not enough on its own
+//!
+//! Knowing which module a kernel stands in for says nothing about whether it stands in for it
+//! correctly. A native implementation that disagrees with the module is a second decoder for the
+//! same bytes, and the one that runs is the one nobody read, so a wrong answer arrives as data
+//! rather than as an error.
+//!
+//! [`Differential`] is what closes that, and it closes it in the type system rather than in a
+//! checklist. It runs both implementations over a [`Corpus`] and compares what comes back down to
+//! the byte, and what it hands out on success is a [`Kernel`]. [`Registry::with`] takes a [`Kernel`]
+//! and there is no other way to make one, so a host that registers an implementation without
+//! running the comparison does not compile. That is worth more than a build script or a test, both
+//! of which can be skipped by somebody in a hurry.
+//!
+//! What the run covers is the corpus it was given, and [`Corpus`] is plain about what that is worth.
+//!
 //! # What substitution does not skip
 //!
 //! Everything except running the module. The module is still read out of the container and still
@@ -53,16 +88,19 @@
 //!
 //! # What is not here yet
 //!
-//! No implementation of anything. This crate is the table and the trait, and the kernels that go in
-//! it come with the differential runs that prove they agree with the modules they stand in for. A
-//! native kernel without one of those is worth less than nothing, because it is a second decoder
-//! that quietly disagrees with the first.
+//! No implementation of anything. This crate is the table, the trait and the harness that proves a
+//! kernel belongs in the table. The kernels themselves come later, and each one arrives with the
+//! corpus it was proved against.
 
 #![forbid(unsafe_code)]
 
+mod corpus;
+mod differential;
 mod native;
 mod registry;
 
+pub use corpus::{Case, Corpus};
+pub use differential::{Differential, Kernel, Mismatch};
 pub use native::{Error, Native, Result, Scanning};
 pub use registry::Registry;
 

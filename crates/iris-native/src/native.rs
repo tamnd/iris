@@ -56,6 +56,13 @@ pub trait Native: fmt::Debug + Send + Sync {
     /// know whether the container is resident or is being read a window at a time, and a range that
     /// has not arrived yet is a reason to await rather than a reason to spin.
     ///
+    /// The `Hello` is the terms this scan is running under, and it is here rather than being
+    /// remembered from the handshake because one of these is shared by every scan on every thread
+    /// and has nowhere to remember anything. A guest gets the same numbers, as a session it opens
+    /// with, and `max_batch_rows` is the one that shows: a decoder cuts its rows into batches of
+    /// that size, so an implementation that ignores it produces the right values in the wrong number
+    /// of batches and is not a substitute for the module.
+    ///
     /// # Errors
     ///
     /// [`Error::Source`] if a range could not be read, [`Error::Malformed`] if the bytes are not
@@ -63,6 +70,7 @@ pub trait Native: fmt::Debug + Send + Sync {
     /// agreed to and then could not do.
     fn scan<'a>(
         &'a self,
+        hello: &'a Hello,
         request: &'a ScanRequest<'a>,
         source: &'a mut (dyn RangeSource + Send),
     ) -> Scanning<'a>;

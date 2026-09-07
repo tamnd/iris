@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use iris_abi::CapabilitySet;
 use iris_format::Digest;
 
+use crate::differential::Kernel;
 use crate::native::Native;
 
 /// Which decoders this host has its own implementation of.
@@ -26,14 +28,30 @@ use crate::native::Native;
 /// digest while carrying different bytes has already been refused before this table is consulted.
 /// There is no method here that takes a name, and adding one would mean adding a field.
 ///
+/// # Why the only thing it accepts is a proved kernel
+///
+/// Registering a native implementation asserts that it produces what running the module would have
+/// produced, and that assertion is the reason substitution is allowed to happen at all. An
+/// unverified one is worse than having no fast path, because the fast path is the one that runs.
+/// So the only thing that goes in here is a [`Kernel`], and the only thing that makes a [`Kernel`]
+/// is [`Differential::verify`](crate::Differential::verify). Code that registers an implementation
+/// without a differential run does not compile.
+///
 /// # Sharing one
 ///
 /// Cloning is a handle rather than a copy, and a registry is meant to be built once when the
 /// process starts and handed to every runtime. Building it per query would work and would mean
-/// hashing every module again for nothing.
+/// running every differential again for nothing.
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
-    entries: Arc<HashMap<Digest, Arc<dyn Native>>>,
+    entries: Arc<HashMap<Digest, Entry>>,
+}
+
+/// One implementation and the terms it was proved under.
+#[derive(Clone, Debug)]
+struct Entry {
+    native: Arc<dyn Native>,
+    offered: Vec<CapabilitySet>,
 }
 
 impl Registry {
@@ -46,35 +64,34 @@ impl Registry {
         Self::default()
     }
 
-    /// Registers an implementation against the module it is a rewrite of.
+    /// Adds an implementation that has been proved against the module it stands in for.
     ///
-    /// This is the way to do it. The digest is computed here from the bytes handed in, so what a
-    /// host says is "this code decodes what that module decodes" and the identity is derived rather
-    /// than typed. [`Registry::with_digest`] is for a host that has the digest and not the module,
-    /// and it is the one where a wrong answer is possible.
+    /// The digest is the one the differential run computed from the module bytes it compiled, so
+    /// nothing here is typed by hand and there is no registration that names the wrong module and
+    /// then silently never fires.
     #[must_use]
-    pub fn with_module(self, module: &[u8], native: Arc<dyn Native>) -> Self {
-        self.with_digest(Digest::of(module), native)
-    }
-
-    /// Registers an implementation against a digest the host already has.
-    ///
-    /// For a host that keeps its modules somewhere else and does not want to read one in order to
-    /// name it. The digest has to be the hash of the module bytes and nothing checks that here,
-    /// which is why [`Registry::with_module`] exists and is the one to reach for.
-    #[must_use]
-    pub fn with_digest(mut self, digest: Digest, native: Arc<dyn Native>) -> Self {
-        Arc::make_mut(&mut self.entries).insert(digest, native);
+    pub fn with(mut self, kernel: Kernel) -> Self {
+        let (digest, native, offered) = kernel.into_parts();
+        Arc::make_mut(&mut self.entries).insert(digest, Entry { native, offered });
         self
     }
 
-    /// The implementation registered for these module bytes, if there is one.
+    /// The implementation registered for these module bytes under these terms, if there is one.
     ///
-    /// The digest is the whole of the question. A caller that has a name and no digest has nothing
-    /// to ask with, which is the point.
+    /// The digest is most of the question and the terms are the rest of it. A kernel is proved
+    /// under the capability sets it was run against, and a host offering a decoder something else
+    /// is asking for behaviour nobody compared, so it gets the sandbox instead. That is the safe
+    /// direction to fail in: a host that adds a capability to what it offers loses substitution
+    /// until somebody runs the differential again, rather than keeping it on terms the kernel has
+    /// never seen.
+    ///
+    /// A caller that has a name and no digest has nothing to ask with, which is the point.
     #[must_use]
-    pub fn get(&self, digest: &Digest) -> Option<Arc<dyn Native>> {
-        self.entries.get(digest).map(Arc::clone)
+    pub fn get(&self, digest: &Digest, offered: CapabilitySet) -> Option<Arc<dyn Native>> {
+        self.entries
+            .get(digest)
+            .filter(|entry| entry.offered.contains(&offered))
+            .map(|entry| Arc::clone(&entry.native))
     }
 
     /// How many implementations are registered.
@@ -94,14 +111,20 @@ impl Registry {
 mod tests {
     use std::sync::Arc;
 
-    use iris_abi::{Hello, ScanRequest};
+    use iris_abi::{Capability, CapabilitySet, Hello, ScanRequest};
+    use iris_format::Digest;
     use iris_source::RangeSource;
     use iris_vm::Handshake;
 
     use super::Registry;
+    use crate::differential::Kernel;
     use crate::native::{Native, Result, Scanning};
 
     /// Stands in for nothing and is never run. These tests are about the table.
+    ///
+    /// They build their kernels with the constructor that skips the differential, which only exists
+    /// while this crate's own tests are compiled. The runs that use a real module and a real kernel
+    /// are in `iris-runtime`'s tests, because that is where a decoder gets built.
     #[derive(Debug)]
     struct Stub;
 
@@ -112,6 +135,7 @@ mod tests {
 
         fn scan<'a>(
             &'a self,
+            _hello: &'a Hello,
             _request: &'a ScanRequest<'a>,
             _source: &'a mut (dyn RangeSource + Send),
         ) -> Scanning<'a> {
@@ -119,19 +143,29 @@ mod tests {
         }
     }
 
+    /// The terms the tests here register and look up under.
+    fn terms() -> CapabilitySet {
+        CapabilitySet::new().with(Capability::RANDOM_ACCESS)
+    }
+
+    /// A kernel for these module bytes, proved under [`terms`] as far as this table is concerned.
+    fn kernel(module: &[u8]) -> Kernel {
+        Kernel::untested(Digest::of(module), Arc::new(Stub), vec![terms()])
+    }
+
     #[test]
     fn a_module_is_found_by_its_own_bytes_and_by_nothing_else() {
         let module = b"the bytes of a decoder, near enough for a lookup";
-        let registry = Registry::new().with_module(module, Arc::new(Stub));
+        let registry = Registry::new().with(kernel(module));
 
         assert_eq!(registry.len(), 1);
-        assert!(registry.get(&iris_format::Digest::of(module)).is_some());
+        assert!(registry.get(&Digest::of(module), terms()).is_some());
 
         // One byte different is a different decoder, and there is no sense in which it is nearly
         // the same one. That is the property the whole table rests on.
         let mut nearly = module.to_vec();
         nearly[0] ^= 1;
-        assert!(registry.get(&iris_format::Digest::of(&nearly)).is_none());
+        assert!(registry.get(&Digest::of(&nearly), terms()).is_none());
     }
 
     #[test]
@@ -140,7 +174,7 @@ mod tests {
         assert!(registry.is_empty());
         assert!(
             registry
-                .get(&iris_format::Digest::of(b"anything at all"))
+                .get(&Digest::of(b"anything at all"), terms())
                 .is_none()
         );
     }
@@ -148,9 +182,20 @@ mod tests {
     #[test]
     fn registering_the_same_module_twice_keeps_the_second_one() {
         let module = b"one decoder";
-        let registry = Registry::new()
-            .with_module(module, Arc::new(Stub))
-            .with_module(module, Arc::new(Stub));
+        let registry = Registry::new().with(kernel(module)).with(kernel(module));
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn terms_the_kernel_was_never_proved_under_get_the_sandbox() {
+        let module = b"one decoder";
+        let registry = Registry::new().with(kernel(module));
+
+        // The same module, the same host, and one more capability on offer than anybody compared
+        // this implementation under. The answer is nothing, which sends the container to the
+        // sandbox rather than to code that has never been asked to project.
+        let more = terms().with(Capability::PROJECTION);
+        assert!(registry.get(&Digest::of(module), more).is_none());
+        assert!(registry.get(&Digest::of(module), terms()).is_some());
     }
 }
