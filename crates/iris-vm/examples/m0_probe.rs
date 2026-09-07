@@ -454,6 +454,17 @@ fn compiled_scan() -> wasmtime::Result<Vec<u8>> {
     ] {
         cargo.env_remove(leaked);
     }
+    // The compiler is named rather than left to be found. A cargo invoked this way looks for `rustc`
+    // on PATH, which on a machine whose default toolchain is not the pinned one is a toolchain that
+    // has never been asked to install the wasm32 target. It fails with `can't find crate for core`,
+    // which reads as a missing target and is not one. The rustc next to the cargo that built this
+    // binary is by definition the one it was built with.
+    let rustc = Path::new(env!("CARGO"))
+        .parent()
+        .map(|bin| bin.join(if cfg!(windows) { "rustc.exe" } else { "rustc" }));
+    if let Some(rustc) = rustc.filter(|path| path.is_file()) {
+        cargo.env("RUSTC", rustc);
+    }
 
     let out = cargo.output()?;
     if !out.status.success() {

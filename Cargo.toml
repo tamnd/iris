@@ -27,6 +27,10 @@ iris-runtime = { path = "crates/iris-runtime", version = "0.5.2" }
 iris-source = { path = "crates/iris-source", version = "0.5.2" }
 iris-trust = { path = "crates/iris-trust", version = "0.5.2" }
 iris-vm = { path = "crates/iris-vm", version = "0.5.2" }
+# No version on this one, unlike every line above it. It is not published, and a dev-dependency
+# without a version is dropped when the crate that uses it is packaged, which is what keeps
+# `iris-vm` publishable while its vectorisation probe links against this.
+m5-decode = { path = "crates/m5-decode" }
 
 anyhow = "1.0.104"
 arrow-array = "59.3.0"
