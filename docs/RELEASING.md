@@ -23,6 +23,8 @@ The tag points at the release commit rather than at whatever is on the default b
 
 ## Publishing to crates.io
 
+Minors go to crates.io and patches do not. A patch is work in the middle of a milestone, so it is a tag and a GitHub release and nothing more, and the versions on crates.io are the trees where a milestone finished. That is why the list there reads `0.3.0`, `0.4.0`, `0.5.0` and so on with nothing in between, while the tag list has the patches too. Anybody wanting a tree between two minors has the tag and can build it. The `0.2.x` run at the bottom of the list is the exception and the section below says why.
+
 crates.io starts at `0.2.0` rather than at `0.1.0`, and that is deliberate. `v0.1.0` was tagged at the tree where M0 finished, before any of the publishing machinery existed, and by the time it did exist the command line package had been renamed because `iris-cli` belongs to somebody else. Publishing `0.1.0` from a tree that is not the one the tag points at would make the tag a lie for the sake of a round number. `v0.1.1` was tagged while M1 was still in progress and the first publish of it never got past the limit on new names, so rather than spend an hour creating ten names for a tree nobody would install, the first version on crates.io is the one where M1 finished.
 
 The gap is not a problem to fix later. A version that exists as a tag and not on crates.io is readable from the tag list, while a version published from the wrong tree is not readable from anywhere.
