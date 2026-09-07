@@ -15,9 +15,17 @@ name: M5 vectorisation probe
 # it is the only reason there is an arm64 half of this result at all, because the self hosted fleet is
 # entirely x86-64.
 #
-# Two tunings per architecture, because one ratio on its own says nothing. The baseline build and the
-# target-cpu=native build differ by vector width on x86-64 and do not differ by vector width on arm64,
-# so it is the pair that carries the argument.
+# Two tunings per architecture, because one ratio on its own says nothing. The pair differs by vector
+# width on x86-64 and does not differ by vector width on arm64, so it is the pair that carries the
+# argument.
+#
+# The second tuning names a target rather than saying target-cpu=native, for two reasons. The first is
+# that native means something different on every machine the job lands on, and a ratio that cannot be
+# reproduced because nobody recorded which processor produced it is not worth taking. The second is
+# that it does not work: native on a hosted x86-64 runner emits instructions Valgrind 3.22 cannot
+# decode, and the whole counter step dies on `Unrecognised instruction` before it counts anything.
+# x86-64-v3 is exactly the step being measured, which is 128 bit vectors to 256, and neoverse-n1 is
+# the arm64 control, which is Neon at 128 bits either way.
 #
 # Nothing here fails a build on a number. A red result is information.
 
@@ -61,9 +69,9 @@ jobs:
       matrix:
         include:
           - { name: linux-x86_64, os: ubuntu-24.04, tuning: baseline, rustflags: "" }
-          - { name: linux-x86_64, os: ubuntu-24.04, tuning: native, rustflags: "-C target-cpu=native" }
+          - { name: linux-x86_64, os: ubuntu-24.04, tuning: tuned, rustflags: "-C target-cpu=x86-64-v3" }
           - { name: linux-aarch64, os: ubuntu-24.04-arm, tuning: baseline, rustflags: "" }
-          - { name: linux-aarch64, os: ubuntu-24.04-arm, tuning: native, rustflags: "-C target-cpu=native" }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm, tuning: tuned, rustflags: "-C target-cpu=neoverse-n1" }
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
@@ -75,8 +83,9 @@ jobs:
         with:
           key: m5-${{ matrix.name }}-${{ matrix.tuning }}
 
-      # Which machine this landed on, because target-cpu=native means something different on every
-      # one of them and a ratio without the model number next to it is not reproducible.
+      # Which machine this landed on. Hosted runners are not one model of processor, and a counter
+      # taken on one of them is only quotable next to the part that produced it. This goes to the log
+      # as well as to the summary, because the summary is not what a later reader greps.
       - name: Record what this machine actually is
         run: |
           {
@@ -87,7 +96,7 @@ jobs:
             grep -m1 'Features' /proc/cpuinfo || true
             grep -m1 'flags' /proc/cpuinfo || true
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       # callgrind, which counts instructions by simulating and therefore needs no hardware support.
       # A hosted runner is a virtual machine and will not have a performance monitoring unit to read,

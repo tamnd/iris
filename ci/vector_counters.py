@@ -217,6 +217,19 @@ def measure(tool: str, side: str, repeats: int, cases: str | None) -> dict[str, 
         ]
     out = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
     if out.returncode != 0:
+        # Valgrind decodes the instruction stream itself, and its decoder is not
+        # the processor's. A build tuned for the exact machine can emit something
+        # it has never been taught, and then it stops on that one instruction with
+        # a page of register state that reads like a crash in the probe and is not
+        # one. Naming it here is the difference between a five minute diagnosis
+        # and an afternoon of looking at the wrong code.
+        if "Unrecognised instruction" in out.stderr:
+            sys.exit(
+                "callgrind cannot decode this build. Something in it uses an instruction Valgrind "
+                "does not implement, which is what a target-cpu tuned for the exact machine tends "
+                "to produce. Build for a named target instead, so that what was measured is "
+                "written down and Valgrind has heard of it."
+            )
         sys.exit(f"the probe failed at {side} and {repeats} repeats:\n{out.stderr}")
     return parse_perf(out.stderr) if tool == "perf" else parse_callgrind(out.stderr)
 
