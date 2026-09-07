@@ -193,7 +193,9 @@ A global memory pool, genuinely `Send` jobs, `loom` coverage, and `iris-df`.
 
 ## M7, the native fast path
 
-`iris-native`, keyed by content hash, with its differential harness. This is deferred to here even though the WebAssembly vector width ceiling makes it required infrastructure, for one reason: M5's arm64 result may show the gap is x86 only, which changes both the priority and the kernel set. Building it before knowing that is building the wrong thing quickly.
+`iris-native`, keyed by content hash, with its differential harness. This was deferred to here even though the WebAssembly vector width ceiling appeared to make it required infrastructure, for one reason: M5's arm64 result might have shown the gap was x86 only, which would have changed both the priority and the kernel set. Building it before knowing that is building the wrong thing quickly.
+
+The result is in and it says something different from either branch of that. The gap is not x86 only, and it is not vector width either. The guest executes about 1.7 times the host's instructions on both architectures and it does not use the 128 bit vectors it already has, so a native kernel set exists to remove bounds checks and memory base reloads rather than to reach wider vectors. That is still worth having and it is a smaller claim than the one this milestone was ordered around. `docs/VECTORISATION.md` has the numbers.
 
 **Gate.** Registering a native kernel without a passing byte identical differential run is a build failure, not a warning. Keying is on the content hash, so a decoder with a different hash claiming the same name gets the WebAssembly path. Substitution is logged with both digests on every scan. The ahead of time compilation cache is keyed on the decoder digest, the Wasmtime version, the target triple and the configuration hash, with cold start numbers published.
 
@@ -213,7 +215,7 @@ Places to stop and reassess rather than push through.
 | M0 | Does windowing tax the local path? | The first bet failed. Two code paths forever, or reconsider the inversion. **Open: passes on aarch64, fails on x86-64, being reproduced on hardware that is not shared** |
 | M2 | What does validation cost? | Over 15%, keep it on and make digest pinning the documented normal path. Do not ship it off. **Settled: 17 to 23% on strings against the tightest denominator there is, under 7% on everything else, on all four platforms. It stays on, iris-bench claim C0001** |
 | M5 | Do declared ranges win on object storage? | The main differentiator is gone and the design notes are wrong. **Settled: no. Projection pushdown is exact, but a page indexed Parquet reader over an uncompressed file moves the same bytes to within one percent, and over a compressed one it moves 2.7 times fewer. Ranges are not the differentiator. Carrying the decoder is. See `docs/REMOTE_SCAN.md`** |
-| M5 | Is the vectorisation gap architecture neutral? | If yes, M7 drops in priority and the story gets much better |
+| M5 | Is the vectorisation gap architecture neutral? | If yes, M7 drops in priority and the story gets much better. **Settled: the instruction count gap is architecture neutral, 1.71 on arm64 against 1.76 on x86-64, and the wall clock gap is not, 1.29 on an M4 against 1.83 cycles on an EPYC. Doubling the host's vector width is worth six to eleven percent of the host's instructions, about a tenth of the gap. The guest does not use its own vectors at all. M7 is still worth doing and it is for bounds checks rather than for vector width. See `docs/VECTORISATION.md`** |
 
 ## Risks
 
