@@ -224,11 +224,16 @@ def measure(tool: str, side: str, repeats: int, cases: str | None) -> dict[str, 
         # one. Naming it here is the difference between a five minute diagnosis
         # and an afternoon of looking at the wrong code.
         if "Unrecognised instruction" in out.stderr:
+            told = [
+                line
+                for line in out.stderr.splitlines()
+                if "unhandled instruction bytes" in line or "Unrecognised instruction" in line
+            ]
             sys.exit(
                 "callgrind cannot decode this build. Something in it uses an instruction Valgrind "
-                "does not implement, which is what a target-cpu tuned for the exact machine tends "
-                "to produce. Build for a named target instead, so that what was measured is "
-                "written down and Valgrind has heard of it."
+                "does not implement, which is what asking for a target-cpu richer than the "
+                "baseline tends to produce. Lower the target-cpu until Valgrind has heard of "
+                "everything in it, and write down which one that was.\n" + "\n".join(told)
             )
         sys.exit(f"the probe failed at {side} and {repeats} repeats:\n{out.stderr}")
     return parse_perf(out.stderr) if tool == "perf" else parse_callgrind(out.stderr)

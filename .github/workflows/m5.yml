@@ -24,8 +24,13 @@ name: M5 vectorisation probe
 # reproduced because nobody recorded which processor produced it is not worth taking. The second is
 # that it does not work: native on a hosted x86-64 runner emits instructions Valgrind 3.22 cannot
 # decode, and the whole counter step dies on `Unrecognised instruction` before it counts anything.
-# x86-64-v3 is exactly the step being measured, which is 128 bit vectors to 256, and neoverse-n1 is
-# the arm64 control, which is Neon at 128 bits either way.
+# x86-64-v3 is exactly the step being measured, which is 128 bit vectors to 256.
+#
+# The arm64 second leg is cortex-a72, which is a control rather than a step: Neon is 128 bits on both
+# sides of that pair and there is nothing wider on the target to ask for. It is a72 and not one of the
+# Neoverse parts because Valgrind cannot decode what those emit either, and a control that does not
+# run is not a control. What it is there to show is that the pair does not move on arm64, which is
+# what makes the movement on the x86-64 pair attributable to the one thing that changed.
 #
 # Nothing here fails a build on a number. A red result is information.
 
@@ -71,7 +76,7 @@ jobs:
           - { name: linux-x86_64, os: ubuntu-24.04, tuning: baseline, rustflags: "" }
           - { name: linux-x86_64, os: ubuntu-24.04, tuning: tuned, rustflags: "-C target-cpu=x86-64-v3" }
           - { name: linux-aarch64, os: ubuntu-24.04-arm, tuning: baseline, rustflags: "" }
-          - { name: linux-aarch64, os: ubuntu-24.04-arm, tuning: tuned, rustflags: "-C target-cpu=neoverse-n1" }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm, tuning: tuned, rustflags: "-C target-cpu=cortex-a72" }
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
