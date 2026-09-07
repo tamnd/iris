@@ -85,10 +85,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A self hosted runner runs its jobs from a service rather than a login shell, so a rustup
+          # that somebody installed by hand is sitting in ~/.cargo/bin and is not on PATH. Put it on
+          # PATH before deciding whether one needs installing. Deciding first gets this backwards: the
+          # check fails, the installer runs over a machine that already has a settings file, prints
+          # that it is skipping the toolchain, and leaves the step calling a rustup it cannot find.
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show active-toolchain || rustup toolchain install
           rustup target add wasm32-unknown-unknown
@@ -155,10 +160,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A self hosted runner runs its jobs from a service rather than a login shell, so a rustup
+          # that somebody installed by hand is sitting in ~/.cargo/bin and is not on PATH. Put it on
+          # PATH before deciding whether one needs installing. Deciding first gets this backwards: the
+          # check fails, the installer runs over a machine that already has a settings file, prints
+          # that it is skipping the toolchain, and leaves the step calling a rustup it cannot find.
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show active-toolchain || rustup toolchain install
           rustup target add wasm32-unknown-unknown
@@ -311,10 +321,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A self hosted runner runs its jobs from a service rather than a login shell, so a rustup
+          # that somebody installed by hand is sitting in ~/.cargo/bin and is not on PATH. Put it on
+          # PATH before deciding whether one needs installing. Deciding first gets this backwards: the
+          # check fails, the installer runs over a machine that already has a settings file, prints
+          # that it is skipping the toolchain, and leaves the step calling a rustup it cannot find.
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show active-toolchain || rustup toolchain install
           rustc --version
@@ -401,10 +416,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A self hosted runner runs its jobs from a service rather than a login shell, so a rustup
+          # that somebody installed by hand is sitting in ~/.cargo/bin and is not on PATH. Put it on
+          # PATH before deciding whether one needs installing. Deciding first gets this backwards: the
+          # check fails, the installer runs over a machine that already has a settings file, prints
+          # that it is skipping the toolchain, and leaves the step calling a rustup it cannot find.
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show active-toolchain || rustup toolchain install
           rustc --version
