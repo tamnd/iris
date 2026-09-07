@@ -130,6 +130,20 @@ impl Program {
         self.deadline
     }
 
+    /// The same compiled module, with a different budget for a call into it.
+    ///
+    /// Compiling and metering are separate questions and this is what keeps them separate. The
+    /// deadline is a property of the host's patience rather than of the code, so a host that keeps
+    /// compiled modules around and shares them between callers who disagree about how long a call
+    /// may take restamps one rather than compiling the same bytes twice. Nothing about the module is
+    /// touched, and the engine handle is the same handle, so this costs a clone of the decoder's
+    /// name.
+    #[must_use]
+    pub const fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
     pub(crate) const fn engine(&self) -> &Engine {
         &self.engine
     }

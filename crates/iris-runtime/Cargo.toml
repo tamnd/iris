@@ -71,6 +71,13 @@ object_store = { workspace = true, features = ["aws"] }
 parquet = { workspace = true, features = ["arrow", "async", "snap", "zstd"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
+# The other side of the same coin. loom is only ever built when the flag that its models are written
+# behind is set, which is what stops it being a dependency of anything anybody ships. It is a
+# dev-dependency as well, so it is out of the graph for a host that depends on this crate either way,
+# and this line is what makes the models unbuildable rather than merely unrun in a normal build.
+[target.'cfg(loom)'.dev-dependencies]
+loom.workspace = true
+
 [features]
 # Off by default and not API. It exposes the two halves of assembling a batch so the guard cost
 # probe can time one against the other. See the `probe` module for why that is a feature rather than

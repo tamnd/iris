@@ -96,6 +96,21 @@
 //! the ABI check, because the ABI message describes the schema and formatting a schema you have not
 //! checked is how a refusal becomes a crash.
 //!
+//! # Share the runtime
+//!
+//! A [`Runtime`] holds the compiler and the decoders it has already compiled, and cloning one is a
+//! handle to both rather than a second copy of either. Compiling is by a wide margin the most
+//! expensive thing here, so a host that builds a runtime per query pays for the compiler per query,
+//! and a query engine that splits a scan across partitions and opens the container in each of them
+//! would pay for it per partition.
+//!
+//! Sharing is safe because a decoder has an identity that does not depend on where it was found.
+//! The module is hashed and checked against the container before it is compiled, so two containers
+//! naming the same digest carry the same code, and handing the second one a module the first one
+//! compiled is handing it the module it asked for. [`Runtime::decoders_compiled`] is how a host
+//! checks that this is actually happening, and [`Runtime::with_decoder_cache_bytes`] is how it says
+//! how much of it to keep.
+//!
 //! # What it does not do yet
 //!
 //! Nothing here reads ahead on its own. A source handed to [`Runtime::open_windowed`] is used
@@ -119,6 +134,7 @@
 mod assemble;
 mod dataset;
 mod error;
+mod pool;
 mod schema;
 
 pub use dataset::{Dataset, Runtime, Windowed};
@@ -206,4 +222,11 @@ const _: () = {
     is_send::<Runtime>();
     is_send::<Dataset<'static>>();
     is_send::<Windowed>();
+
+    // And a runtime is `Sync` besides, which the other two are not asked to be. It is the one thing
+    // here that is meant to be held by several threads at once rather than moved between them: a
+    // table provider hands out one handle to it per partition, and the pool of compiled decoders
+    // inside it is worth nothing at all if it can only be reached from the thread that made it.
+    const fn is_sync<T: Sync>() {}
+    is_sync::<Runtime>();
 };
