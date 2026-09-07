@@ -25,7 +25,8 @@ DRY_RUN="${2:-}"
 # iris-trust and depends on it, which nothing noticed until crates.io refused the upload with three
 # names already published. The order is still written down rather than derived, because it is read
 # by anybody trying to understand the release, but it is now checked against the manifests before
-# anything is uploaded.
+# anything is uploaded. That check earned its place the next time the graph moved: iris-native took a
+# dependency on iris-vm when it grew a trait, and the list needed reordering again.
 CRATES=(
   iris-abi
   iris-format
@@ -33,9 +34,9 @@ CRATES=(
   iris-guard
   iris-source
   iris-trust
-  iris-native
   iris-decoder
   iris-vm
+  iris-native
   iris-runtime
   iris-df
   irisdb

@@ -107,6 +107,16 @@ pub enum Error {
     #[error(transparent)]
     Source(#[from] iris_source::SourceError),
 
+    /// A native implementation of a decoder failed.
+    ///
+    /// Only reachable on a container whose decoder digest was in the registry handed to
+    /// [`crate::Runtime::with_native`], which is to say only when this host was running its own code
+    /// in place of the module. It is a variant of its own rather than folded into [`Error::Vm`]
+    /// because the two go to different people: a guest that trapped is a problem with the dataset's
+    /// decoder, and this is a problem with the host's rewrite of it.
+    #[error(transparent)]
+    Native(#[from] iris_native::Error),
+
     /// The host and the decoder could not agree on terms.
     #[error("the decoder and this host could not agree: {reason}: {detail}")]
     Refused {
