@@ -455,6 +455,29 @@ impl Dataset<'_> {
         )
     }
 
+    /// What this host and the decoder settled on, without reading a row.
+    ///
+    /// A caller planning a scan needs this before it plans one. Projection is the case that matters:
+    /// asking a decoder that never agreed to [`Capability::PROJECTION`] for three columns out of
+    /// forty is refused rather than served whole, so a query engine deciding whether to push a
+    /// projection down or to apply it itself has to be able to ask first. Everything else in the set
+    /// is worth the same kind of question, which is why this hands back the set rather than an
+    /// answer about one bit.
+    ///
+    /// It costs one instantiation and one handshake, and no scan. That is a fraction of what
+    /// compiling the module cost, and this is meant to be asked once when a dataset is opened rather
+    /// than once per scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Refused`] if the decoder and this host cannot agree on terms at all, and
+    /// [`Error::Vm`] if the decoder trapped during the handshake.
+    pub fn capabilities(&self) -> Result<CapabilitySet> {
+        let mut decoder = Decoder::instantiate(&self.program)?;
+        decoder.load_source(self.source)?;
+        Ok(agree(&mut decoder, &self.hello())?.agreed)
+    }
+
     fn hello(&self) -> Hello {
         Hello {
             abi_major: ABI_MAJOR,
@@ -664,6 +687,26 @@ impl Windowed {
         outcome
     }
 
+    /// What this host and the decoder settled on, without reading a row.
+    ///
+    /// See [`Dataset::capabilities`], which answers the same question about the other path. This
+    /// one takes the source out and puts it back the way a scan does, so it is not free: the
+    /// handshake itself asks nothing of the source, but a source that was lost to a panicking scan
+    /// is reported here as [`Error::SourceLost`] rather than as an empty set.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Dataset::capabilities`], plus [`Error::SourceLost`] if the source is not
+    /// attached.
+    pub fn capabilities(&mut self) -> Result<CapabilitySet> {
+        let mut decoder = Decoder::instantiate(&self.program)?;
+        let source = self.source.take().ok_or(Error::SourceLost)?;
+        decoder.attach(source);
+        let agreed = agree(&mut decoder, &self.hello());
+        self.source = decoder.detach();
+        Ok(agreed?.agreed)
+    }
+
     fn hello(&self) -> Hello {
         Hello {
             abi_major: ABI_MAJOR,
@@ -690,24 +733,7 @@ fn run(
     count: u64,
     columns: &[u32],
 ) -> Result<Vec<RecordBatch>> {
-    // Waited on rather than polled. Waiting is what a host with a thread to spare does, and it is
-    // what this one is: it has been handed a scan and has nothing else to do until it answers. A
-    // host that does have something else to do drives `iris_vm::Running` itself, which is why the
-    // suspension is in that crate rather than hidden in here.
-    let handshake = decoder.start(&record(|w| hello.encode(w))?).wait()?;
-
-    // The decoder has already said yes by this point, and this is the host saying yes back.
-    // Both sides check, because a decoder that agrees to terms it cannot meet and a host that
-    // runs a decoder it cannot serve are different bugs and only one of them is ours.
-    let ack = HelloAck {
-        abi_major: handshake.abi_major,
-        abi_minor: handshake.abi_minor,
-        required: handshake.required,
-        optional: handshake.optional,
-        decoder_id: &handshake.decoder_id,
-    };
-    let agreement: Agreement =
-        negotiate(hello, &ack).map_err(|refusal| Error::refused(&refusal))?;
+    let agreement = agree(decoder, hello)?;
 
     // Checked before anything is asked for rather than after something comes back. A decoder that
     // never mentioned projection will read every column whatever it is sent, and the batches it
@@ -741,6 +767,28 @@ fn run(
         batches.push(record_batch(&projected, batch)?);
     }
     Ok(batches)
+}
+
+/// Shakes hands, and hands back what the two sides settled on.
+///
+/// Waited on rather than polled. Waiting is what a host with a thread to spare does, and it is what
+/// this one is: it has been handed a scan and has nothing else to do until it answers. A host that
+/// does have something else to do drives `iris_vm::Running` itself, which is why the suspension is
+/// in that crate rather than hidden in here.
+///
+/// The decoder has already said yes by the time the ack is built, and the negotiation is the host
+/// saying yes back. Both sides check, because a decoder that agrees to terms it cannot meet and a
+/// host that runs a decoder it cannot serve are different bugs and only one of them is ours.
+fn agree(decoder: &mut Decoder, hello: &Hello) -> Result<Agreement> {
+    let handshake = decoder.start(&record(|w| hello.encode(w))?).wait()?;
+    let ack = HelloAck {
+        abi_major: handshake.abi_major,
+        abi_minor: handshake.abi_minor,
+        required: handshake.required,
+        optional: handshake.optional,
+        decoder_id: &handshake.decoder_id,
+    };
+    negotiate(hello, &ack).map_err(|refusal| Error::refused(&refusal))
 }
 
 /// The schema the batches of a projected scan carry.

@@ -171,6 +171,13 @@ pub mod probe {
 /// from outside the container, should not have to add a dependency to do it.
 pub use iris_trust::{Policy, Resolve, Untrusted};
 
+/// What a host and a decoder can agree to do for each other.
+///
+/// Re-exported because [`Dataset::capabilities`] and [`Windowed::capabilities`] hand one back. A
+/// caller asking whether it may push a projection down is holding one of these, and it should not
+/// have to depend on iris-abi to name the bit it is testing.
+pub use iris_abi::{Capability, CapabilitySet};
+
 /// The identity of a decoder, which is the hash of its bytes and nothing else.
 ///
 /// Re-exported because [`Dataset::decoder_digest`] and [`Windowed::decoder_digest`] hand one back. A

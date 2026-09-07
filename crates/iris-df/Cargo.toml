@@ -1,0 +1,38 @@
+[package]
+name = "iris-df"
+description = "A DataFusion table provider that reads iris datasets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# DataFusion brings arrow with it and this workspace pins arrow itself, so the two have to agree or
+# a batch produced here is a different type from the batch DataFusion expects. DataFusion 55 asks
+# for arrow 59.2 and this workspace is on 59.3, which is one graph rather than two.
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+# The trait this crate exists to implement is an `#[async_trait]` one, so implementing it means
+# using the macro it was declared with.
+async-trait.workspace = true
+datafusion.workspace = true
+futures.workspace = true
+iris-runtime.workspace = true
+iris-source.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+iris-abi.workspace = true
+iris-format.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
