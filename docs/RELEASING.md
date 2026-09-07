@@ -90,3 +90,9 @@ A fourth machine, four cores and six gigabytes, is not in the fleet. It is alrea
 Nothing in the `Fleet` workflow runs on a pull request, and that is a security property rather than an oversight. A self hosted runner executes whatever the workflow tells it to, so letting a pull request from a fork reach one hands an arbitrary person a shell on a machine we own. Push to the default branch, a schedule and a manual dispatch are trusted inputs. A fork's pull request is not.
 
 The two EPYC machines are shared tenancy virtual machines, so they run the test suite, which is a correctness question, and they do not produce any number with a duration in it. The one machine that does is the i9-13900K, and the reasoning behind that split is written down in the iris-bench machine notes rather than repeated here.
+
+Two things about setting one of these up are worth writing down, because both of them fail in a way that looks like a workflow bug and is not.
+
+The runner executes jobs from a service and not from a login shell, so nothing in the account's profile is in scope. A rustup installed by hand lives in `~/.cargo/bin`, that directory is put on PATH by `~/.profile`, and the service never reads it. Put the directory in `PATH` in the runner's own `.env` file, next to the runner script, and restart the service. The `Toolchain` step also puts it on PATH itself, so a machine that has this wrong still works, but it works by reinstalling rustup on every job and that is worth not doing.
+
+Jobs that need containers need the runner account in the `docker` group. The group usually exists with nobody in it, and the failure is `permission denied while trying to connect to the docker API`, which reads like the daemon is down when it is running perfectly well. Group membership is read when the service starts, so this one also needs a restart to take effect.
