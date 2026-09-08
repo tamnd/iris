@@ -28,6 +28,7 @@ iris-df = { path = "crates/iris-df", version = "0.8.2" }
 iris-format = { path = "crates/iris-format", version = "0.8.2" }
 iris-guard = { path = "crates/iris-guard", version = "0.8.2" }
 iris-native = { path = "crates/iris-native", version = "0.8.2" }
+iris-parquet = { path = "crates/iris-parquet", version = "0.8.2" }
 iris-runtime = { path = "crates/iris-runtime", version = "0.8.2" }
 iris-source = { path = "crates/iris-source", version = "0.8.2" }
 iris-trust = { path = "crates/iris-trust", version = "0.8.2" }

@@ -257,6 +257,20 @@ Two things about it were not expected. The first is that the `duckdb` crate is a
 
 The second is that nothing in the crate links DuckDB. Every function it calls is reached through the table of pointers DuckDB hands an extension when it loads it, so the artefact is built on machines that have no DuckDB installed and only the test needs one. That test is a real session against a real container, because a library whose callees do not exist until a database loads it has no honest unit test.
 
+### What the Parquet embedding came out as
+
+A Parquet file with an iris container in the gap between the last row group and the footer, and two keys in the file metadata saying where it is. `docs/PARQUET.md` is the page.
+
+The position is the finding. Bytes between the last row group and the footer are bytes no offset in the footer names, so no reader asks for them, and the container needs no adjustment to anything the writer already wrote. That means an unmodified reader pays nothing at all, which is a stronger property than the obvious arrangement gives: base64 in the file metadata would work and would be paid for on open, by every reader, including all the ones that get nothing back for it.
+
+Two directions had to work and both do. A file written this way is read by pyarrow and by DuckDB, which are two Parquet implementations that share no code with each other and none with the arrow-rs one the crate is built on, and all three agree on the row count, the column count and the sum of every value. `ci/parquet-embed.sh` compares those numbers against each other rather than against constants, because what is being checked is that readers that share nothing agree.
+
+Both of those readers can also see the two keys without being taught anything, which is what makes this something somebody else could implement against rather than a private arrangement between two crates in one repository. DuckDB has a table function for it. pyarrow has it on the file metadata rather than on the Arrow schema, which is worth knowing because the schema is the first place anybody looks.
+
+Nothing about the embedding survives a rewrite through another writer, and the rows do. That is checked rather than assumed, because a documented behaviour nobody checks is a hope.
+
+The crate is 332 lines, of which 158 are code, and with the examples, the tests and the script that drives the other readers it comes to 939. It depends on `iris-format` and on Parquet and not on the runtime, so a reader with no interest in iris can depend on it to find out whether a file carries a container without pulling a wasm engine in behind it.
+
 ## Decision points
 
 Places to stop and reassess rather than push through.

@@ -42,11 +42,12 @@ Every performance claim here is settled in [`tamnd/iris-bench`](https://github.c
 | `iris-c` | The C ABI. A shared library, a static library and one header, handing back Arrow C structures. |
 | `iris-py` | The Python bindings, over the C ABI. A wheel that hands back Arrow through the PyCapsule interface. |
 | `iris-duckdb` | The DuckDB extension. One table function that reads a container, in 275 lines. |
+| `iris-parquet` | A container carried inside a Parquet file, in the gap unmodified readers never look at. |
 | `irisdb` | The command line tool: inspect, verify, decode, bundle. Installs a binary called `iris`. |
 
 Every crate is `iris-something` except the command line tool, which is `irisdb` on crates.io because the bare name is on the registry's reserved list. `cargo install irisdb` gives you a binary called `iris`.
 
-The DataFusion integration is `iris-df`. The C ABI is `iris-c`, described for a C programmer in [`docs/C_ABI.md`](docs/C_ABI.md), and it ships as a shared library, a static library and a header attached to a release rather than as a crate. The Python bindings are `iris-py`, described in [`docs/PYTHON.md`](docs/PYTHON.md), and they ship as a wheel called `irisdb` that you import as `iris`. The DuckDB extension is `iris-duckdb`, described in [`docs/DUCKDB.md`](docs/DUCKDB.md), and it ships as a `.duckdb_extension` file attached to a release. The rest of M8, which is the Parquet embedding, is planned and is not in this tree yet.
+The DataFusion integration is `iris-df`. The C ABI is `iris-c`, described for a C programmer in [`docs/C_ABI.md`](docs/C_ABI.md), and it ships as a shared library, a static library and a header attached to a release rather than as a crate. The Python bindings are `iris-py`, described in [`docs/PYTHON.md`](docs/PYTHON.md), and they ship as a wheel called `irisdb` that you import as `iris`. The DuckDB extension is `iris-duckdb`, described in [`docs/DUCKDB.md`](docs/DUCKDB.md), and it ships as a `.duckdb_extension` file attached to a release. The Parquet embedding is `iris-parquet`, described in [`docs/PARQUET.md`](docs/PARQUET.md): a container carried inside a Parquet file, in the gap between the last row group and the footer, where a reader that has never heard of iris never looks. The rest of M8 is the community proposal that argues for it.
 
 ## Building
 

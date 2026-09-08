@@ -2590,6 +2590,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-parquet"
+version = "0.8.2"
+dependencies = [
+ "arrow-array 59.3.0",
+ "arrow-schema 59.3.0",
+ "iris-abi",
+ "iris-format",
+ "iris-runtime",
+ "parquet",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "iris-py"
 version = "0.8.2"
 dependencies = [
