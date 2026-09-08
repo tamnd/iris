@@ -56,10 +56,11 @@ jobs:
           #
           # jobs is set per machine rather than left to cargo, which sizes itself by core count and
           # not by memory. Building wasmtime wants well over a gigabyte per job, and the smaller box
-          # here has less headroom than that times its core count.
+          # here has less headroom than that times its core count. The 12 GB machine was on 4 and the
+          # OOM killer took the runner service down mid build, so it is on 3.
           - name: epyc-6c-12gb
             runner: [self-hosted, linux, x64, epyc-6c-12gb]
-            jobs: 4
+            jobs: 3
           - name: epyc-8c-24gb
             runner: [self-hosted, linux, x64, epyc-8c-24gb]
             jobs: 6

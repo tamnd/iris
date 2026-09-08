@@ -21,8 +21,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A container to put in the archive, so that the first thing anybody tries after unpacking has
+  # something to open. It is built once rather than per target because a container is a file and does
+  # not care which machine reads it, and it cannot be built in the target jobs at all: three of the
+  # five of those are cross compiling and cannot run what they just built.
+  fixture:
+    name: Sample container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-fixture
+      - name: Write it
+        run: cargo run --release --locked -p iris-runtime --example write_container -- sample.iris
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fixture
+          path: sample.iris
+          retention-days: 7
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.target }}
+    needs: [fixture]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -38,6 +63,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: fixture
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
@@ -53,6 +81,9 @@ jobs:
           # The package is irisdb and the binary it produces is iris. crates.io holds the bare name,
           # so only the registry slot changed and everything below still copies a file called iris.
           cargo build --release --locked --target "$TARGET" -p irisdb
+          # The C ABI, which is a shared library, a static library and a header rather than anything
+          # cargo installs, so the release is the only way anybody gets it.
+          cargo build --release --locked --target "$TARGET" -p iris-c
       - name: Package
         shell: bash
         env:
@@ -60,13 +91,47 @@ jobs:
         run: |
           set -euo pipefail
           name="iris-${GITHUB_REF_NAME}-${TARGET}"
-          mkdir -p "dist/$name"
-          if [ -f "target/$TARGET/release/iris.exe" ]; then
-            cp "target/$TARGET/release/iris.exe" "dist/$name/"
+          out="dist/$name"
+          mkdir -p "$out/include" "$out/lib" "$out/examples"
+          built="target/$TARGET/release"
+
+          if [ -f "$built/iris.exe" ]; then
+            cp "$built/iris.exe" "$out/"
           else
-            cp "target/$TARGET/release/iris" "dist/$name/"
+            cp "$built/iris" "$out/"
           fi
-          cp LICENSE NOTICE README.md "dist/$name/"
+
+          # Whichever of the six library files this platform produced. Named rather than globbed, so
+          # a platform that quietly stops producing one fails here rather than shipping an archive
+          # that is missing the thing somebody downloaded it for.
+          copied=0
+          for file in libiris.so libiris.dylib iris.dll iris.dll.lib libiris.a iris.lib; do
+            if [ -f "$built/$file" ]; then
+              cp "$built/$file" "$out/lib/"
+              copied=$((copied + 1))
+            fi
+          done
+          # Two on every platform: one shared and one static. Windows adds the import library, which
+          # is why this is a floor rather than an equality.
+          if [ "$copied" -lt 2 ]; then
+            echo "only $copied library files in $built, which is not a C ABI" >&2
+            exit 1
+          fi
+
+          # A dylib is stamped with the path it will be loaded from and cargo stamps it with the
+          # absolute path it was built at, which is a directory on a runner that will not exist
+          # anywhere else. `@rpath` makes it the loader's question instead, which is what every other
+          # library on the platform does and what lets a program link it with an `-rpath` of its own.
+          if [ -f "$out/lib/libiris.dylib" ]; then
+            install_name_tool -id @rpath/libiris.dylib "$out/lib/libiris.dylib"
+          fi
+
+          cp crates/iris-c/include/iris.h "$out/include/"
+          cp crates/iris-c/examples/scan.c "$out/examples/"
+          cp docs/C_ABI.md "$out/"
+          cp sample.iris "$out/"
+          cp LICENSE NOTICE README.md "$out/"
+
           cd dist
           if [[ "$TARGET" == *windows* ]]; then
             7z a "$name.zip" "$name" >/dev/null
@@ -81,9 +146,81 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  # The gate for the C ABI, and the reason it is here rather than in CI: what goes wrong with a
+  # native library is not that it fails a test, it is that it does not link or does not load on a
+  # machine that is not the one that built it. So this takes the archive that is about to be
+  # released, removes the Rust toolchain from the runner, checks that it is gone, and then builds
+  # `scan.c` with nothing but the platform's own compiler and runs it against the container in the
+  # archive. Publishing waits on it, so a release that cannot be used from C is not a release.
+  smoke:
+    name: Clean machine ${{ matrix.target }}
+    needs: [build]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-${{ matrix.target }}
+      - name: Take the toolchain away
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$HOME/.cargo" "$HOME/.rustup"
+          for tool in cargo rustc rustup; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "$tool is still here, so this machine is not the clean one" >&2
+              exit 1
+            fi
+          done
+          echo "no cargo, no rustc, no rustup"
+      - name: Unpack
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          name="iris-${GITHUB_REF_NAME}-${TARGET}"
+          if [ -f "$name.zip" ]; then
+            7z x "$name.zip" >/dev/null
+          else
+            tar -xzf "$name.tar.gz"
+          fi
+          echo "ARCHIVE=$name" >> "$GITHUB_ENV"
+      - name: Build and run it, Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$ARCHIVE"
+          cc -std=c99 -Wall -Wextra -I include examples/scan.c -L lib -liris -o scan
+          export LD_LIBRARY_PATH="$PWD/lib" DYLD_LIBRARY_PATH="$PWD/lib"
+          ./scan sample.iris | tee output.txt
+          grep -q "rows: 1000 in" output.txt
+      # MSVC rather than anything installed for the occasion. `vswhere` is on the image and is how
+      # everything else on Windows finds the compiler, so this is the platform's own toolchain in the
+      # same sense that `cc` is on the other two.
+      - name: Build and run it, Windows
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          cd %ARCHIVE%
+          cl /nologo /I include examples\scan.c lib\iris.dll.lib /Fe:scan.exe || exit /b 1
+          copy lib\iris.dll . >nul
+          scan.exe sample.iris > output.txt || exit /b 1
+          type output.txt
+          findstr /c:"rows: 1000 in" output.txt >nul || exit /b 1
+
   publish:
     name: Publish
-    needs: [build]
+    needs: [build, smoke]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 20

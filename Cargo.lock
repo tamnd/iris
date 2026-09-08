@@ -166,6 +166,7 @@ dependencies = [
  "chrono-tz",
  "half",
  "hashbrown 0.17.1",
+ "libc",
  "num-complex",
  "num-integer",
  "num-traits",
@@ -306,6 +307,7 @@ version = "59.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10fab8d4563491417ba801fab29d205104d20d4bdf37bda6cd1cf425cff598cd"
 dependencies = [
+ "bitflags",
  "serde_core",
  "serde_json",
 ]
@@ -2181,6 +2183,21 @@ name = "iris-btr"
 version = "0.8.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "iris-c"
+version = "0.8.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "iris-abi",
+ "iris-format",
+ "iris-native",
+ "iris-runtime",
+ "iris-source",
+ "iris-vm",
+ "tempfile",
 ]
 
 [[package]]

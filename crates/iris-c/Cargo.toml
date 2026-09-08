@@ -1,0 +1,52 @@
+[package]
+name = "iris-c"
+description = "The C ABI for iris, over the Arrow C data interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# Not on crates.io. What this crate produces is a shared library, a static library and a header, and
+# none of the three is something cargo installs. They are packaged by the `Release` workflow and
+# attached to a release, which is what `docs/C_ABI.md` tells a C programmer to download.
+publish = false
+
+[lib]
+# The package is `iris-c` and the library it produces is `iris`, so a C programmer writes `-liris`
+# against `libiris.so`, `libiris.dylib` or `iris.dll`. Naming the artefact after the package would
+# put an underscore in the middle of the one string every C build system has to get right, for no
+# reason a C programmer would recognise.
+name = "iris"
+# `cdylib` and `staticlib` are the two things a C programmer links against. `rlib` is there so that
+# the tests in this crate can call the same entry points a C caller does, in process, without going
+# through a linker.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# The `ffi` feature is the whole reason this crate can be small. A schema and a stream of batches
+# already have a C representation that everything in this ecosystem agrees on, so the ABI here is
+# five handles and two Arrow structs rather than a description of what a column is.
+arrow-array = { workspace = true, features = ["ffi"] }
+arrow-schema.workspace = true
+iris-runtime.workspace = true
+
+# The tests here open the same container the gate tests open, by including their support module from
+# the crate next door rather than by growing a second way to build a fixture. That is what these are
+# for and none of them is reachable from the library. The alternative was a fixture of this crate's
+# own, which would be a second container shape that nothing else in the tree ever reads, and the
+# whole value of the C tests is that what a C caller opens is what everything else opens.
+[dev-dependencies]
+iris-abi.workspace = true
+iris-format.workspace = true
+iris-native.workspace = true
+iris-source.workspace = true
+iris-vm.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
