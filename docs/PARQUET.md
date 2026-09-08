@@ -69,6 +69,26 @@ The obvious question is which half is smaller, and for this fixture it is Parque
 
 What this page is claiming is the mechanism and not a ratio. A dataset whose encoding beats Parquet by enough to be worth carrying can now be carried in a Parquet file, and it is the same file either way.
 
+## What it costs the reader that did not ask for it
+
+The size above is paid by whoever stores the file. The number that decides whether any of this is a good idea is the other one: what a reader that has never heard of iris pays for bytes it will never look at. That is measured rather than argued, by `ci/parquet-cost.py`, and the argument it feeds is in [`docs/PARQUET_PROPOSAL.md`](PARQUET_PROPOSAL.md).
+
+`crates/iris-parquet/examples/variants.rs` writes the same rows three times with the same writer. `plain` carries no container and is the control. `gap` is what this crate writes. `inline` is the container base64 encoded into the file metadata, which is where Parquet says extensions belong.
+
+The fixture is 200,000 rows of four `int64` columns, so the container is 6,473,928 bytes and is large enough for the difference to be visible. Apple M4, ten cores, 24 GiB, macOS 15.8, pyarrow 25.0.0 and DuckDB 1.5.1. Forty repeats after five warm up passes, three rounds, cheapest round reported, median in milliseconds.
+
+| | plain | gap | inline | plain again |
+|---|---|---|---|---|
+| footer, bytes | 1,019 | 1,149 | 8,632,952 | |
+| pyarrow, open | 0.041 | 0.049 | 6.705 | 0.046 |
+| DuckDB, open | 0.222 | 0.378 | 3.147 | 0.228 |
+| pyarrow, read | 3.495 | 3.522 | 12.126 | 3.998 |
+| DuckDB, read | 2.143 | 2.609 | 8.084 | 2.622 |
+
+The last column is the plain file measured a second time under another name, and it is there so the first column has something to be compared against that is known to be identical to it. Nothing separating the gap from the plain file in this table is larger than what separates the plain file from itself. Across the three runs behind it the gap file's DuckDB open came out 0.15 ms above the control once, 0.03 below it once and 0.12 below it once, which is a machine and not a file.
+
+The inline column is not noise. Putting the container where the metadata goes makes the footer 8,632,952 bytes instead of 1,149, and every reader parses the whole footer to open the file at all. That is 6.7 ms against 0.05 for pyarrow and 3.1 against 0.2 for DuckDB, paid by a reader that wanted the rows, before it has read a single one.
+
 ## What does not survive
 
 Nothing about this survives a rewrite. A reader that opens one of these files and writes it back out has written a new Parquet file, and a new Parquet file has no gap and no keys in it. The rows survive, because they were always there as ordinary Parquet.
@@ -77,7 +97,7 @@ That is the honest behaviour rather than a limitation to work around. The contai
 
 ## How big it is
 
-The crate is 332 lines, of which 158 are code. With the two examples, the tests and the script that drives the other readers, everything this is made of comes to 939 lines.
+The crate is 333 lines, of which 159 are code. With the three examples, the tests and the two scripts that drive the other readers, everything this is made of comes to 1,257 lines.
 
 ## What is not here
 
