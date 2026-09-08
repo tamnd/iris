@@ -168,11 +168,32 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: dist-${{ matrix.target }}
+      # This used to delete two directories under `$HOME` and then check the names were gone, and it
+      # broke the day the macOS image moved its toolchain out of the home directory. So it deletes
+      # whatever the names resolve to instead of a list of paths somebody wrote down once, which is
+      # the only version of this that keeps working when an image is rebuilt. The same block is in
+      # the wheel job below, word for word, because neither job checks the repository out far enough
+      # to share a script and a copy is cheaper than a checkout that defeats the point.
       - name: Take the toolchain away
         shell: bash
         run: |
           set -euo pipefail
           rm -rf "$HOME/.cargo" "$HOME/.rustup"
+          for _ in 1 2 3 4 5; do
+            left=""
+            for tool in rustup cargo rustc rustdoc cargo-clippy cargo-fmt; do
+              path=$(command -v "$tool" 2>/dev/null || true)
+              if [ -n "$path" ]; then
+                echo "removing $path"
+                rm -f "$path" 2>/dev/null || sudo rm -f "$path"
+                left="yes"
+              fi
+            done
+            hash -r 2>/dev/null || true
+            if [ -z "$left" ]; then
+              break
+            fi
+          done
           for tool in cargo rustc rustup; do
             if command -v "$tool" >/dev/null 2>&1; then
               echo "$tool is still here, so this machine is not the clean one" >&2
@@ -288,11 +309,28 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: fixture
+      # The same block as the one in the C smoke job above, and the note there explains both why it
+      # deletes what the names resolve to and why it is a copy.
       - name: Take the toolchain away
         shell: bash
         run: |
           set -euo pipefail
           rm -rf "$HOME/.cargo" "$HOME/.rustup"
+          for _ in 1 2 3 4 5; do
+            left=""
+            for tool in rustup cargo rustc rustdoc cargo-clippy cargo-fmt; do
+              path=$(command -v "$tool" 2>/dev/null || true)
+              if [ -n "$path" ]; then
+                echo "removing $path"
+                rm -f "$path" 2>/dev/null || sudo rm -f "$path"
+                left="yes"
+              fi
+            done
+            hash -r 2>/dev/null || true
+            if [ -z "$left" ]; then
+              break
+            fi
+          done
           for tool in cargo rustc rustup; do
             if command -v "$tool" >/dev/null 2>&1; then
               echo "$tool is still here, so this machine is not the clean one" >&2
