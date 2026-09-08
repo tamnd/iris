@@ -284,7 +284,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      # The major tag rather than `master`, which is what this action's README still suggests. A
+      # branch is whatever somebody pushed to it this morning, and there is no reason for a run here
+      # to be the place that finds out.
+      - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly
           components: miri
