@@ -2502,18 +2502,18 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "iris-abi"
-version = "0.8.2"
+version = "0.9.0"
 
 [[package]]
 name = "iris-btr"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "iris-c"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "arrow-array 59.3.0",
  "arrow-schema 59.3.0",
@@ -2528,14 +2528,14 @@ dependencies = [
 
 [[package]]
 name = "iris-decoder"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "iris-abi",
 ]
 
 [[package]]
 name = "iris-df"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "arrow-array 59.3.0",
  "arrow-schema 59.3.0",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "iris-duckdb"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "duckdb",
  "iris-c",
@@ -2561,7 +2561,7 @@ dependencies = [
 
 [[package]]
 name = "iris-format"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "iris-abi",
@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "iris-guard"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "arrow-schema 59.3.0",
  "iris-abi",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "iris-native"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "iris-abi",
  "iris-format",
@@ -2591,7 +2591,7 @@ dependencies = [
 
 [[package]]
 name = "iris-parquet"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "arrow-array 59.3.0",
  "arrow-schema 59.3.0",
@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "iris-py"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "iris-c",
  "pyo3",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "iris-runtime"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "arrow-array 59.3.0",
  "arrow-buffer 59.3.0",
@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "iris-source"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "libc",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "iris-trust"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "iris-abi",
  "iris-format",
@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "iris-vm"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "iris-abi",
  "iris-format",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "irisdb"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2950,11 +2950,11 @@ dependencies = [
 
 [[package]]
 name = "m0-scan"
-version = "0.8.2"
+version = "0.9.0"
 
 [[package]]
 name = "m5-decode"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "iris-btr",
 ]

@@ -43,7 +43,9 @@ When that passes, run it again with the dry run box unticked.
 
 ### Why it is slow the first time
 
-crates.io limits how fast new crate *names* can be created much harder than it limits new versions of a crate that already exists. This workspace publishes ten crates, so the first release has to wait out that limit. Expect it to take upward of an hour. Every publish after it takes a few minutes.
+crates.io limits how fast new crate *names* can be created much harder than it limits new versions of a crate that already exists. This workspace publishes thirteen crates, and the first release had to wait out that limit for every one of them. Expect that one to take upward of an hour. Every publish after it takes a few minutes.
+
+The limit comes back whenever a release adds a name rather than a version. `0.9.0` is the first release with `iris-parquet` in it, so that one name goes through the new name limit while the other twelve do not, and a run that stops on it has published everything else and can be rerun.
 
 `ci/publish.sh` does not guess at how long to wait. When crates.io answers 429 it names the time the next name is due, and the script reads that time out of the response and sleeps until it, with a minute of margin. That is worth doing rather than picking an interval because the interval is not documented, it depends on how much of the account's burst is left, and a guess that is thirty seconds short costs another full wait rather than another thirty seconds.
 
@@ -53,9 +55,11 @@ A crate that has been throttled for longer than `MAX_WAIT_PER_CRATE` stops the r
 
 Dependency order, written down in the script rather than derived, because the list is read by anybody trying to understand the release and a derived one is not:
 
-`iris-abi`, `iris-format`, `iris-btr`, `iris-guard`, `iris-source`, `iris-trust`, `iris-decoder`, `iris-vm`, `iris-native`, `iris-runtime`, `iris-df`, `irisdb`.
+`iris-abi`, `iris-format`, `iris-btr`, `iris-guard`, `iris-source`, `iris-trust`, `iris-decoder`, `iris-vm`, `iris-native`, `iris-runtime`, `iris-parquet`, `iris-df`, `irisdb`.
 
-The script checks that list against the manifests before it uploads anything, which it does because the list was wrong once in exactly the way a hand written list goes wrong. `iris-native` sat above `iris-trust` and depends on it, and nothing noticed until crates.io refused the upload with three names already published. A half published release is the expensive failure here, since a version cannot be taken back, only yanked, so reading twelve manifests first is a second of work against a mistake that costs an afternoon.
+`iris-parquet` sits below `iris-runtime` for a reason its manifest shows and its library does not. It needs nothing but `iris-format` to build, and a reader that only wants to know whether a file carries a container should not pull a wasm engine in behind it, so the runtime is a dev-dependency there rather than a dependency. A dev-dependency that names a version is kept when a crate is packaged, so the version it names has to be on crates.io already.
+
+The script checks that list against the manifests before it uploads anything, which it does because the list was wrong once in exactly the way a hand written list goes wrong. `iris-native` sat above `iris-trust` and depends on it, and nothing noticed until crates.io refused the upload with three names already published. A half published release is the expensive failure here, since a version cannot be taken back, only yanked, so reading thirteen manifests first is a second of work against a mistake that costs an afternoon.
 
 The check has since earned its place twice. `iris-native` grew a trait built on the types `iris-vm` defines, which moved it below `iris-vm` in the order, and the script said so before anything was uploaded rather than after.
 
