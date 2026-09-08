@@ -47,6 +47,17 @@ allow = ["Unicode-DFS-2016"]
 name = "webpki-root-certs"
 allow = ["CDLA-Permissive-2.0"]
 
+# The same list under a different package name, arriving from somewhere else.
+# libduckdb-sys can download and build DuckDB itself, and the HTTP client it
+# would do that with carries this. That feature is off, so nothing here builds
+# it, but a lock file records what a crate could pull rather than what it does
+# and cargo-deny reads the lock file. The reasoning is the one above: a licence
+# for data rather than for code, on a list of certificate authorities, putting
+# no condition on anything that uses it.
+[[licenses.exceptions]]
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

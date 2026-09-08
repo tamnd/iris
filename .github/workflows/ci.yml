@@ -194,6 +194,40 @@ jobs:
       - name: Build guest crates for wasm32
         run: cargo build --locked --target wasm32-unknown-unknown -p iris-abi -p iris-decoder --lib --examples
 
+  # The DuckDB extension links nothing, so the compiler cannot say whether it works. Every function
+  # it calls is reached through a table of pointers a database hands it at load, which means the only
+  # thing that can tell us the answers are right is a database asking for them. So this builds the
+  # extension and runs a real session against a real container.
+  #
+  # One platform is enough here. What this catches is a wrong answer, and a wrong answer is wrong
+  # everywhere. The five platform builds are in the release workflow, where the failure worth
+  # catching is a library that will not load rather than one that reads the wrong column.
+  duckdb:
+    name: DuckDB extension
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      # The version of the database that runs the queries. The extension declares a minimum C API
+      # version and not a DuckDB release, so this moves on its own and nothing else has to follow.
+      DUCKDB_VERSION: v1.5.5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: duckdb
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Get the DuckDB command line tool
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/duckdb.zip" \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip"
+          unzip -q "$RUNNER_TEMP/duckdb.zip" -d "$RUNNER_TEMP"
+          "$RUNNER_TEMP/duckdb" --version
+      - name: A container, a session and five answers
+        run: ci/duckdb-session.sh "$RUNNER_TEMP/duckdb"
+
   # iris-abi is the surface that ossifies, so it carries the strictest
   # structural constraint in the tree: no dependencies, and no standard library.
   no-std:
@@ -347,6 +381,7 @@ jobs:
         test,
         object-storage,
         wasm,
+        duckdb,
         no-std,
         features,
         msrv,

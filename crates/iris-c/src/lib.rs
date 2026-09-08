@@ -68,8 +68,12 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 
-use arrow_array::ffi::FFI_ArrowSchema;
-use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+// Named again here rather than only used, so that a Rust caller can write the types down. The two
+// Arrow C structures are the whole return surface of this library and `iris-duckdb` is built against
+// a different major of Arrow than this crate is, which is allowed precisely because these are C
+// structures with a fixed layout rather than Rust types. Saying so needs both sides nameable.
+pub use arrow_array::ffi::FFI_ArrowSchema;
+pub use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::{ArrowError, SchemaRef};
 use iris_runtime::Runtime;

@@ -1,0 +1,33 @@
+[package]
+name = "iris-duckdb"
+description = "The DuckDB extension for iris, a table function that reads a container."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# Not on crates.io. What this crate produces is a `.duckdb_extension` file, which is a shared library
+# with a metadata block appended, and that is not a thing cargo installs. It comes out of a release.
+publish = false
+
+[lib]
+# The shared library, and nothing else. A DuckDB extension is loaded by path and its entry point is
+# found by name, so there is no Rust API here for anything to depend on.
+crate-type = ["cdylib"]
+# Same reason as `iris-py`: a test target would make `cargo test --workspace` link this, and the
+# symbols it calls live in the DuckDB process that loads it rather than in any library on this
+# machine. What tests this is a DuckDB session, and `ci/duckdb-session.sh` runs one.
+test = false
+doctest = false
+
+[dependencies]
+duckdb.workspace = true
+iris-c.workspace = true
+
+[lints]
+workspace = true
