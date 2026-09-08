@@ -1,0 +1,42 @@
+[build-system]
+requires = ["maturin>=1.15,<2.0"]
+build-backend = "maturin"
+
+[project]
+# The bare name is taken on PyPI, by a client for a product that was renamed years ago, exactly as
+# it is taken on crates.io. So the distribution is `irisdb` in both places and what you import is
+# `iris`, which is also what the command line tool installs itself as.
+name = "irisdb"
+description = "Ship the decoder with the data. Python bindings for the iris self decoding dataset runtime."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "iris contributors" }]
+keywords = ["arrow", "dataset", "decoder", "parquet", "webassembly"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Rust",
+  "Topic :: Database",
+  "Topic :: Scientific/Engineering",
+]
+# maturin reads it out of Cargo.toml, so the version lives in one place for the whole workspace.
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/tamnd/iris"
+Repository = "https://github.com/tamnd/iris"
+Issues = "https://github.com/tamnd/iris/issues"
+
+[project.optional-dependencies]
+# Only the tests need pyarrow. The wheel itself does not import it and does not depend on it, which
+# is the point of handing data over through the Arrow protocol rather than through a library.
+test = ["pyarrow>=16", "pytest>=8"]
+
+[tool.maturin]
+module-name = "iris._iris"
+python-source = "python"
+manifest-path = "Cargo.toml"

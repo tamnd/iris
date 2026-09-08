@@ -218,9 +218,105 @@ jobs:
           type output.txt
           findstr /c:"rows: 1000 in" output.txt >nul || exit /b 1
 
+  # One wheel per platform rather than one per platform per Python, which is what `abi3-py39` buys.
+  # Linux builds inside a manylinux container, because a wheel linked against whatever glibc a runner
+  # happens to have is a wheel that installs on that runner and nowhere else.
+  wheels:
+    name: Wheel ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, manylinux: "2_28" }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, manylinux: "2_28" }
+          - { target: aarch64-apple-darwin, os: macos-latest, manylinux: "off" }
+          - { target: x86_64-apple-darwin, os: macos-latest, manylinux: "off" }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, manylinux: "off" }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --out dist --manifest-path crates/iris-py/Cargo.toml
+          sccache: "true"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+          retention-days: 7
+          if-no-files-found: error
+
+  # The gate for the Python bindings, and the same argument as the one above it: what goes wrong with
+  # a wheel is that it does not install or does not import somewhere, which no test run next to the
+  # compiler will ever find. So this takes the wheel that is about to be released, removes the Rust
+  # toolchain from the runner, installs the wheel from the file, and runs the Python tests against
+  # the container in the archive. Publishing waits on it.
+  wheels-smoke:
+    name: Clean machine wheel ${{ matrix.target }}
+    needs: [fixture, wheels]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    steps:
+      # Only the tests and their fixture come out of the repository. The thing under test is the
+      # wheel, which arrives as an artefact and is installed from a file like anybody else's would
+      # be, so nothing here is built from the tree it is checked out of.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.target }}
+          path: wheel
+      - uses: actions/download-artifact@v8
+        with:
+          name: fixture
+      - name: Take the toolchain away
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$HOME/.cargo" "$HOME/.rustup"
+          for tool in cargo rustc rustup; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "$tool is still here, so this machine is not the clean one" >&2
+              exit 1
+            fi
+          done
+          echo "no cargo, no rustc, no rustup"
+      - name: Install it and run the tests
+        shell: bash
+        env:
+          IRIS_SAMPLE: sample.iris
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pyarrow pytest
+          # The wheel by filename rather than by name, so that pip cannot decide to reach past it and
+          # fetch something from an index instead.
+          python -m pip install --no-index wheel/*.whl
+          python -c "import iris; print('iris', iris.__version__)"
+          python -m pytest crates/iris-py/tests -q
+
   publish:
     name: Publish
-    needs: [build, smoke]
+    needs: [build, smoke, wheels, wheels-smoke]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -236,6 +332,14 @@ jobs:
         with:
           path: dist
           pattern: dist-*
+          merge-multiple: true
+      # The wheels go on the release too, and not only so somebody can download one. The `Publish`
+      # workflow uploads to PyPI from here rather than building its own, so what reaches PyPI is
+      # byte for byte what the clean machine job installed and ran the tests against.
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: wheel-*
           merge-multiple: true
       - name: Checksums
         run: |

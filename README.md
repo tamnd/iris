@@ -40,11 +40,12 @@ Every performance claim here is settled in [`tamnd/iris-bench`](https://github.c
 | `iris-native` | The substitution table, and the differential run that is the only way into it. Native implementations of decoders the host already knows, keyed on the digest of the module and on nothing else, and admitted only after being compared to that module byte for byte. |
 | `iris-df` | A DataFusion table provider. Registers a container as a table and pushes projections into it. |
 | `iris-c` | The C ABI. A shared library, a static library and one header, handing back Arrow C structures. |
+| `iris-py` | The Python bindings, over the C ABI. A wheel that hands back Arrow through the PyCapsule interface. |
 | `irisdb` | The command line tool: inspect, verify, decode, bundle. Installs a binary called `iris`. |
 
 Every crate is `iris-something` except the command line tool, which is `irisdb` on crates.io because the bare name is on the registry's reserved list. `cargo install irisdb` gives you a binary called `iris`.
 
-The DataFusion integration is `iris-df` and the C ABI is `iris-c`, which is described for a C programmer in [`docs/C_ABI.md`](docs/C_ABI.md) and ships as a shared library, a static library and a header attached to a release rather than as a crate. The rest of M8 (DuckDB and Python bindings) is planned and is not in this tree yet.
+The DataFusion integration is `iris-df`. The C ABI is `iris-c`, described for a C programmer in [`docs/C_ABI.md`](docs/C_ABI.md), and it ships as a shared library, a static library and a header attached to a release rather than as a crate. The Python bindings are `iris-py`, described in [`docs/PYTHON.md`](docs/PYTHON.md), and they ship as a wheel called `irisdb` that you import as `iris`. The rest of M8, which is the DuckDB extension and the Parquet embedding, is planned and is not in this tree yet.
 
 ## Building
 

@@ -82,3 +82,46 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: ci/publish.sh "${{ inputs.version }}"
+
+  # The wheels are not rebuilt here. They are downloaded from the release the tag produced, which is
+  # the only way to be sure that what lands on PyPI is what the clean machine job installed and ran
+  # the tests against. A wheel built a second time from the same tree would probably be the same
+  # wheel, and probably is not the word wanted on the one step that cannot be undone.
+  pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: pypi
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Fetch the wheels from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p wheels
+          gh release download "v${{ inputs.version }}" \
+            --repo "${{ github.repository }}" --pattern '*.whl' --dir wheels
+          ls -l wheels
+          # Five platforms, and a run that quietly uploaded three of them would leave the other two
+          # installing from source on machines that have no Rust, which is the failure this whole
+          # milestone is about.
+          count=$(find wheels -name '*.whl' | wc -l)
+          if [ "$count" -ne 5 ]; then
+            echo "expected five wheels on that release and found $count" >&2
+            exit 1
+          fi
+      - name: Check them
+        run: |
+          python -m pip install --upgrade pip twine
+          python -m twine check wheels/*.whl
+      - name: Upload
+        if: ${{ !inputs.dry_run }}
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: python -m twine upload --non-interactive wheels/*.whl
