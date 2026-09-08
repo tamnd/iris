@@ -85,6 +85,8 @@ That is the part worth knowing. The wheels are downloaded from the GitHub releas
 
 So the order is: cut the tag, let `Release` finish, publish the GitHub release, then run `Publish`. Running `Publish` before the release exists gets a job that cannot find any wheels, which is the right failure.
 
+The workflow takes an indexes input because the two rules are not the same. A minor goes to both. A patch goes to PyPI and not to crates.io, and before that input the only thing keeping a patch off crates.io was somebody remembering not to press the button, which is not a rule, it is a hope.
+
 A dry run here is not a metadata check. It uploads the five wheels to TestPyPI, which is what TestPyPI is for, so the credential, the endpoint, the metadata the index actually validates and the five filenames have all been exercised before the real upload runs. The real upload is then a step that has been rehearsed rather than a first attempt. A rerun of a dry run skips what is already there, because a version on TestPyPI is as permanent as a version anywhere else.
 
 The upload is `pypa/gh-action-pypi-publish` rather than a `twine` invocation. It is the one thing in that file PyPI maintains against its own API, and it is also the path to trusted publishing: moving to it means deleting the `password` line and adding `id-token: write` rather than rewriting the step. That move is worth making. Attestations are signed with the OIDC identity of the job that built the artefact and an API token cannot produce one, so until it happens what goes to PyPI carries no provenance while the binaries on the GitHub release do.
