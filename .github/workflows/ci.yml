@@ -228,6 +228,33 @@ jobs:
       - name: A container, a session and five answers
         run: ci/duckdb-session.sh "$RUNNER_TEMP/duckdb"
 
+  # The claim here is that a Parquet file with an iris container inside it is read by readers that
+  # have never heard of iris, so it has to be checked with readers nobody here wrote. pyarrow is
+  # parquet-cpp and DuckDB has a reader of its own, which is two implementations that share no code
+  # with each other and none with the arrow-rs one the crate is built on.
+  parquet:
+    name: A container inside a Parquet file
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: parquet
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: The two readers
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet pyarrow duckdb
+          python -c 'import pyarrow, duckdb; print(pyarrow.__version__, duckdb.__version__)'
+      - name: Write one file and read it three ways
+        run: ci/parquet-embed.sh
+
   # iris-abi is the surface that ossifies, so it carries the strictest
   # structural constraint in the tree: no dependencies, and no standard library.
   no-std:
@@ -382,6 +409,7 @@ jobs:
         object-storage,
         wasm,
         duckdb,
+        parquet,
         no-std,
         features,
         msrv,

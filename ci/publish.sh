@@ -27,6 +27,12 @@ DRY_RUN="${2:-}"
 # by anybody trying to understand the release, but it is now checked against the manifests before
 # anything is uploaded. That check earned its place the next time the graph moved: iris-native took a
 # dependency on iris-vm when it grew a trait, and the list needed reordering again.
+#
+# iris-parquet is below iris-runtime for a reason the library alone does not show: it needs nothing
+# but iris-format to build, and its examples decode a container, so the runtime is a dev-dependency
+# of it. A dev-dependency with a version on it is kept when a crate is packaged, which means the
+# version it names has to be on crates.io already, so a crate that only tests against the runtime
+# still publishes after it.
 CRATES=(
   iris-abi
   iris-format
@@ -38,6 +44,7 @@ CRATES=(
   iris-vm
   iris-native
   iris-runtime
+  iris-parquet
   iris-df
   irisdb
 )
