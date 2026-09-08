@@ -175,7 +175,10 @@ def check_no_machine_identity() -> None:
     ]
     allow = re.compile(r"\b(?:0\.0\.0\.0|127\.0\.0\.1|255\.255\.255\.255)\b")
     suffixes = {".md", ".rs", ".toml", ".yml", ".yaml", ".py", ".sh", ".ps1"}
-    skip_dirs = {".git", "target", "corpus", "artifacts"}
+    # Build output and third party code. A virtualenv next to the Python bindings
+    # is full of other people's version numbers, and a four part one reads as an
+    # address to a check that works on shapes.
+    skip_dirs = {".git", "target", "corpus", "artifacts", ".venv", "__pycache__", "dist"}
     for path in ROOT.rglob("*"):
         if not path.is_file() or path.suffix not in suffixes:
             continue

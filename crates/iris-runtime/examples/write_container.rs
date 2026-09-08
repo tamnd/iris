@@ -1,9 +1,9 @@
 //! Writes a container to a file, for something outside this workspace to open.
 //!
 //! Every test in the tree builds its fixture in memory and never writes one down, which is right for
-//! a test and useless to a C program on a machine that has no Rust on it. The clean machine gate in
-//! `.github/workflows/package.yml` needs a real file to hand to `crates/iris-c/examples/scan.c`, and
-//! this is what produces it.
+//! a test and useless to a C program on a machine that has no Rust on it. The clean machine gates in
+//! `.github/workflows/release.yml` need a real file to hand to `crates/iris-c/examples/scan.c` and to
+//! the Python tests, and this is what produces it.
 //!
 //! ```text
 //! cargo run --release -p iris-runtime --example write_container -- sample.iris

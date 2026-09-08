@@ -237,6 +237,16 @@ Two smaller decisions are worth writing down because both went against the obvio
 
 The gate is in the `Release` workflow rather than in CI, because what goes wrong with a native library is not that it fails a test, it is that it does not link or does not load on a machine that is not the one that built it. So the workflow builds the archive, deletes the Rust toolchain off the runner, checks that `cargo` and `rustc` are gone, and compiles the sample program with nothing but the platform's own compiler on Linux, macOS and Windows. Publishing waits on it.
 
+### What the Python bindings came out as
+
+A wrapper over the C ABI rather than a second implementation, calling its safe side rather than its entry points. That got the C ABI a safe Rust layer it did not have, with the `extern "C"` functions becoming adapters over it, and it means Python and C get the same open, the same projection rule and the same reopen behaviour from one implementation with no second copy to keep in step.
+
+The data comes out through the Arrow PyCapsule interface, which is the Python spelling of the same C data interface the C ABI hands back. A dataset carries `__arrow_c_schema__` and `__arrow_c_stream__`, so `pyarrow.table(dataset)` works, and so do polars and DuckDB, and nothing in the wheel imports any of them or depends on any of them. The alternative was a `to_pandas`, a `to_table`, a `to_polars` and a decision every time somebody writes a dataframe library.
+
+The buffers are not copied, and the gate asked for that to be true rather than claimed. It is checked against pyarrow's own allocator, which does not grow when a table is imported through the C data interface and does when pyarrow builds one by copying. A second test casts a column to a narrower integer to show the number moving, so the first one is a measurement and not a constant.
+
+The clean machine gate is the same shape as the C one and for the same reason. The `Release` workflow builds a wheel for each of five targets, deletes the Rust toolchain, installs the wheel from the file with the package index turned off, and runs the Python tests against a container built elsewhere, on Linux, macOS and Windows. What goes to PyPI afterwards is downloaded from that release rather than built a second time, because a wheel built again from the same tree would probably be the same wheel and probably is not the word wanted on a step that cannot be undone.
+
 ## Decision points
 
 Places to stop and reassess rather than push through.

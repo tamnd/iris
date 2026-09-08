@@ -77,6 +77,18 @@ Asking crates.io to release a reserved name is possible and it is an open ended 
 
 It is a shape check rather than an authorisation check, and that is a limitation rather than a choice. crates.io has no read only endpoint that will say whether a token is live: `/me` is reserved for the website and refuses every API token, and the endpoints that do accept one ignore it. A token that is well formed but revoked still gets found the slow way.
 
+## Publishing to PyPI
+
+The same `Publish` workflow, the same version input, the same dry run default. It runs as a second job next to the crates.io one and it does not build anything.
+
+That is the part worth knowing. The wheels are downloaded from the GitHub release the tag produced, not built again, because those are the wheels the clean machine job installed and ran the tests against. A wheel built a second time from the same tree would probably be the same wheel, and probably is not the word wanted on a step that cannot be undone. The job counts them first and stops if there are not five, since a run that quietly uploaded three would leave two platforms installing from source on machines that have no Rust.
+
+So the order is: cut the tag, let `Release` finish, publish the GitHub release, then run `Publish`. Running `Publish` before the release exists gets a job that cannot find any wheels, which is the right failure.
+
+`PYPI_TOKEN` is a secret on the `pypi` environment and is read only by that job. The distribution is `irisdb` and the module it installs is `iris`, for the same reason as on crates.io and written up in the section above about the name.
+
+Minors only, the same as crates.io, and for the same reason.
+
 ## The fleet
 
 Three self hosted runners exist alongside the hosted ones, and the `Fleet` workflow uses them. They are labelled by hardware rather than by hostname, because a hostname tells a reader nothing they can compare against:

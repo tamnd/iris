@@ -53,8 +53,18 @@
 //! millisecond, which `docs/COLD_START.md` measures. The schema and the name are read once at
 //! [`iris_open`] and kept, so the calls that return them do no work at all.
 
+//! # The Rust side of the same thing
+//!
+//! Everything below the `extern "C"` layer is a safe API on [`IrisRuntime`] and [`IrisDataset`], and
+//! the entry points are adapters over it that check pointers and turn an [`Error`] into a message.
+//! That split exists because the Python bindings are a wrapper over this ABI rather than a second
+//! implementation of it, and a wrapper written against raw pointers would be ceremony with unsafe in
+//! it. Calling the safe methods gets Python the same open, the same projection rule and the same
+//! reopen behaviour a C caller gets, and there is no second copy of any of that to keep in step.
+
 use std::ffi::{CStr, CString, c_char};
-use std::path::Path;
+use std::fmt;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 
@@ -73,6 +83,53 @@ pub const IRIS_ERROR: i32 = 1;
 /// An argument the call cannot do without was null, so nothing was attempted and no message was
 /// produced. This is a bug in the caller rather than a condition, which is why it is separate.
 pub const IRIS_INVALID: i32 = 2;
+
+/// What can go wrong on the safe side of this crate.
+///
+/// A C caller never sees one of these. Every entry point turns it into the string it writes to an
+/// `error` argument, which is why the `Display` text reads as a finished sentence rather than as a
+/// fragment something else is expected to wrap.
+#[derive(Debug)]
+pub enum Error {
+    /// The runtime refused the container, or refused to be built at all.
+    Runtime(iris_runtime::Error),
+    /// A file could not be read. The path is carried so the message can name it, because a caller of
+    /// the C ABI gets a string and has nothing else to go on.
+    Read(PathBuf, std::io::Error),
+    /// The name in the container has a nul byte in it. There is no way to hand that to a C caller,
+    /// so it is refused here rather than quietly truncated at the nul.
+    NameHasNul,
+    /// The schema could not be turned into the Arrow C structure.
+    Schema(ArrowError),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runtime(err) => write!(f, "{err}"),
+            Self::Read(path, err) => write!(f, "{}: {err}", path.display()),
+            Self::NameHasNul => f.write_str("the name in this container contains a nul byte"),
+            Self::Schema(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Runtime(err) => Some(err),
+            Self::Read(_, err) => Some(err),
+            Self::NameHasNul => None,
+            Self::Schema(err) => Some(err),
+        }
+    }
+}
+
+impl From<iris_runtime::Error> for Error {
+    fn from(err: iris_runtime::Error) -> Self {
+        Self::Runtime(err)
+    }
+}
 
 /// A runtime, which is where compiled decoders are held.
 ///
@@ -99,6 +156,128 @@ pub struct IrisDataset {
     name: CString,
     /// The schema, read once.
     schema: SchemaRef,
+}
+
+impl IrisRuntime {
+    /// Makes a runtime.
+    ///
+    /// # Errors
+    ///
+    /// If Wasmtime refuses the configuration this library asks for, which is not something a caller
+    /// can do anything about.
+    pub fn new() -> Result<Self, Error> {
+        Ok(Self {
+            runtime: Arc::new(Runtime::new()?),
+        })
+    }
+
+    /// Points this handle at a runtime that keeps compiled decoders in `dir`.
+    ///
+    /// The builder this stands for takes a runtime by value and a dataset may be holding this one,
+    /// so the handle is pointed at a new runtime rather than the old one being changed. Datasets
+    /// opened before this call keep the runtime they were opened from.
+    ///
+    /// # Errors
+    ///
+    /// The same reason [`IrisRuntime::new`] can fail, since that is what this does first.
+    pub fn set_compilation_cache(&mut self, dir: &str) -> Result<(), Error> {
+        self.runtime = Arc::new(Runtime::new()?.with_compilation_cache(dir));
+        Ok(())
+    }
+
+    /// Opens a container held in memory, taking ownership of the bytes.
+    ///
+    /// The name and the schema are read here and kept, so the accessors for them do no work.
+    ///
+    /// # Errors
+    ///
+    /// If the bytes are not a container this runtime will accept, or if the name in them has a nul
+    /// byte in it.
+    pub fn open(&self, bytes: Box<[u8]>) -> Result<IrisDataset, Error> {
+        let (name, schema) = {
+            let opened = self.runtime.open(&bytes)?;
+            let name = CString::new(opened.name()).map_err(|_| Error::NameHasNul)?;
+            (name, Arc::clone(opened.schema()))
+        };
+
+        Ok(IrisDataset {
+            runtime: Arc::clone(&self.runtime),
+            bytes,
+            name,
+            schema,
+        })
+    }
+
+    /// Opens a container in a file, read whole.
+    ///
+    /// A host that wants the windowed path, where a container larger than memory is read a range at
+    /// a time, is a host writing Rust today.
+    ///
+    /// # Errors
+    ///
+    /// If the file cannot be read, or for either reason [`IrisRuntime::open`] can fail.
+    pub fn open_path(&self, path: &Path) -> Result<IrisDataset, Error> {
+        let bytes = std::fs::read(path).map_err(|err| Error::Read(path.to_path_buf(), err))?;
+        self.open(bytes.into_boxed_slice())
+    }
+}
+
+impl IrisDataset {
+    /// The name the container carries, as a C string, because that is the form a C caller needs and
+    /// converting it back is free.
+    #[must_use]
+    pub fn name(&self) -> &CStr {
+        &self.name
+    }
+
+    /// The schema the container carries, read once at the open.
+    #[must_use]
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    /// The same schema as the Arrow C structure, ready to be handed to whatever is consuming it.
+    ///
+    /// # Errors
+    ///
+    /// If a type in the schema has no Arrow C representation, which the Arrow library decides.
+    pub fn ffi_schema(&self) -> Result<FFI_ArrowSchema, Error> {
+        FFI_ArrowSchema::try_from(self.schema.as_ref()).map_err(Error::Schema)
+    }
+
+    /// Scans and hands back an Arrow C stream over the batches.
+    ///
+    /// `columns` are positions in the schema and an empty slice means every column. A decoder that
+    /// agreed to projection is told which columns to read and fetches the bytes of those and no
+    /// others. One that did not has every column read and the wanted ones taken out of the batches
+    /// afterwards. Both give the same answer and only one of them moves fewer bytes.
+    ///
+    /// The scan happens here, so nothing done with the stream afterwards can fail for a reason that
+    /// has to do with iris.
+    ///
+    /// # Errors
+    ///
+    /// If the container cannot be opened again, or if the scan fails.
+    pub fn stream(&self, columns: &[u32]) -> Result<FFI_ArrowArrayStream, Error> {
+        let opened = self.runtime.open(&self.bytes)?;
+        let mut batches = if columns.is_empty() {
+            opened.scan()?
+        } else {
+            opened.scan_columns(columns)?
+        };
+
+        // The schema of the batches rather than the schema of the container, because a projection
+        // means the two are different and the stream has to describe what is in it.
+        let schema = batches
+            .first()
+            .map_or_else(|| Arc::clone(&self.schema), RecordBatch::schema);
+        batches.reverse();
+
+        Ok(FFI_ArrowArrayStream::new(Box::new(Decoded {
+            schema,
+            batches,
+        })))
+    }
 }
 
 /// Batches that have already been decoded, handed out one at a time.
@@ -145,12 +324,7 @@ pub extern "C" fn iris_version() -> *const c_char {
 /// configuration this library asks for and there is nothing a caller can do about it.
 #[unsafe(no_mangle)]
 pub extern "C" fn iris_runtime_new() -> *mut IrisRuntime {
-    match Runtime::new() {
-        Ok(runtime) => Box::into_raw(Box::new(IrisRuntime {
-            runtime: Arc::new(runtime),
-        })),
-        Err(_) => ptr::null_mut(),
-    }
+    IrisRuntime::new().map_or(ptr::null_mut(), |runtime| Box::into_raw(Box::new(runtime)))
 }
 
 /// Releases a runtime handle. Null is accepted and does nothing.
@@ -199,13 +373,10 @@ pub unsafe extern "C" fn iris_runtime_set_compilation_cache(
         return IRIS_INVALID;
     };
 
-    match Runtime::new() {
-        Ok(runtime) => {
-            handle.runtime = Arc::new(runtime.with_compilation_cache(dir));
-            IRIS_OK
-        }
+    match handle.set_compilation_cache(dir) {
+        Ok(()) => IRIS_OK,
         // SAFETY: `error` is null or one writable pointer.
-        Err(err) => unsafe { report(error, &err.to_string()) },
+        Err(err) => unsafe { report(error, &err) },
     }
 }
 
@@ -236,7 +407,7 @@ pub unsafe extern "C" fn iris_open(
     let bytes: Box<[u8]> = unsafe { std::slice::from_raw_parts(bytes, len) }.into();
 
     // SAFETY: `out` is one writable pointer by the contract above, and `error` is checked inside.
-    unsafe { finish(Arc::clone(&handle.runtime), bytes, out, error) }
+    unsafe { finish(handle.open(bytes), out, error) }
 }
 
 /// Opens a container in a file, read whole.
@@ -266,16 +437,8 @@ pub unsafe extern "C" fn iris_open_path(
         return IRIS_INVALID;
     };
 
-    let bytes = match std::fs::read(Path::new(path)) {
-        Ok(bytes) => bytes.into_boxed_slice(),
-        Err(err) => {
-            // SAFETY: `error` is null or one writable pointer, which is what `report` needs.
-            return unsafe { report(error, &format!("{path}: {err}")) };
-        }
-    };
-
     // SAFETY: `out` is one writable pointer by the contract above, and `error` is checked inside.
-    unsafe { finish(Arc::clone(&handle.runtime), bytes, out, error) }
+    unsafe { finish(handle.open_path(Path::new(path)), out, error) }
 }
 
 /// Releases a dataset handle. Null is accepted and does nothing.
@@ -309,7 +472,7 @@ pub unsafe extern "C" fn iris_dataset_name(dataset: *const IrisDataset) -> *cons
     }
     // SAFETY: the caller promises a live handle, and the pointer returned points into it, which is
     // what the documentation above tells the caller.
-    unsafe { &*dataset }.name.as_ptr()
+    unsafe { &*dataset }.name().as_ptr()
 }
 
 /// Fills in an `ArrowSchema` the caller owns.
@@ -333,7 +496,7 @@ pub unsafe extern "C" fn iris_dataset_schema(
     // SAFETY: the caller promises a live handle for the duration of the call.
     let dataset = unsafe { &*dataset };
 
-    match FFI_ArrowSchema::try_from(dataset.schema.as_ref()) {
+    match dataset.ffi_schema() {
         Ok(schema) => {
             // SAFETY: the caller promises one writable `ArrowSchema` at `out`. Writing rather than
             // assigning is right even when it holds a live schema already, because the interface
@@ -343,7 +506,7 @@ pub unsafe extern "C" fn iris_dataset_schema(
             IRIS_OK
         }
         // SAFETY: `error` is null or one writable pointer.
-        Err(err) => unsafe { report(error, &err.to_string()) },
+        Err(err) => unsafe { report(error, &err) },
     }
 }
 
@@ -395,38 +558,24 @@ pub unsafe extern "C" fn iris_dataset_scan_columns(
     // SAFETY: the caller promises a live handle for the duration of the call.
     let dataset = unsafe { &*dataset };
 
-    let opened = match dataset.runtime.open(&dataset.bytes) {
-        Ok(opened) => opened,
-        // SAFETY: `error` is null or one writable pointer.
-        Err(err) => return unsafe { report(error, &err.to_string()) },
-    };
-
-    let scanned = if count == 0 {
-        opened.scan()
+    let columns: &[u32] = if count == 0 {
+        &[]
     } else {
         // SAFETY: the caller promises `count` readable `u32` at `columns`, and this borrow ends
         // inside the call below.
-        opened.scan_columns(unsafe { std::slice::from_raw_parts(columns, count) })
+        unsafe { std::slice::from_raw_parts(columns, count) }
     };
 
-    let mut batches = match scanned {
-        Ok(batches) => batches,
+    match dataset.stream(columns) {
+        Ok(stream) => {
+            // SAFETY: the caller promises one writable `ArrowArrayStream` at `out`, and the
+            // reasoning about writing rather than assigning is the one at `iris_dataset_schema`.
+            unsafe { ptr::write(out, stream) };
+            IRIS_OK
+        }
         // SAFETY: `error` is null or one writable pointer.
-        Err(err) => return unsafe { report(error, &err.to_string()) },
-    };
-
-    // The schema of the batches rather than the schema of the container, because a projection means
-    // the two are different and the stream has to describe what is in it.
-    let schema = batches
-        .first()
-        .map_or_else(|| Arc::clone(&dataset.schema), RecordBatch::schema);
-    batches.reverse();
-
-    let stream = FFI_ArrowArrayStream::new(Box::new(Decoded { schema, batches }));
-    // SAFETY: the caller promises one writable `ArrowArrayStream` at `out`, and the reasoning about
-    // writing rather than assigning is the one at `iris_dataset_schema`.
-    unsafe { ptr::write(out, stream) };
-    IRIS_OK
+        Err(err) => unsafe { report(error, &err) },
+    }
 }
 
 /// Releases a message this library wrote to an error argument. Null is accepted and does nothing.
@@ -445,40 +594,25 @@ pub unsafe extern "C" fn iris_string_free(message: *mut c_char) {
     drop(unsafe { CString::from_raw(message) });
 }
 
-/// Opens the bytes, keeps what the accessors return, and writes the handle out.
+/// Puts the dataset an open produced behind a pointer, or reports why there is not one.
 ///
 /// # Safety
 ///
 /// `out` must point at one writable pointer and `error` must be null or point at one.
 unsafe fn finish(
-    runtime: Arc<Runtime>,
-    bytes: Box<[u8]>,
+    opened: Result<IrisDataset, Error>,
     out: *mut *mut IrisDataset,
     error: *mut *mut c_char,
 ) -> i32 {
-    let (name, schema) = match runtime.open(&bytes) {
-        Ok(opened) => match CString::new(opened.name()) {
-            Ok(name) => (name, Arc::clone(opened.schema())),
-            // A nul inside a name is not something a container should carry and there is no way to
-            // hand it to a C caller, so it is refused here rather than truncated silently.
-            Err(_) => {
-                // SAFETY: `error` is null or one writable pointer.
-                return unsafe { report(error, "the name in this container contains a nul byte") };
-            }
-        },
+    match opened {
+        Ok(dataset) => {
+            // SAFETY: the caller promises one writable pointer at `out`.
+            unsafe { ptr::write(out, Box::into_raw(Box::new(dataset))) };
+            IRIS_OK
+        }
         // SAFETY: `error` is null or one writable pointer.
-        Err(err) => return unsafe { report(error, &err.to_string()) },
-    };
-
-    let dataset = Box::into_raw(Box::new(IrisDataset {
-        runtime,
-        bytes,
-        name,
-        schema,
-    }));
-    // SAFETY: the caller promises one writable pointer at `out`.
-    unsafe { ptr::write(out, dataset) };
-    IRIS_OK
+        Err(err) => unsafe { report(error, &err) },
+    }
 }
 
 /// Writes a message to an error argument if the caller asked for one, and returns [`IRIS_ERROR`].
@@ -489,9 +623,9 @@ unsafe fn finish(
 /// # Safety
 ///
 /// `error` must be null or point at one writable pointer.
-unsafe fn report(error: *mut *mut c_char, message: &str) -> i32 {
+unsafe fn report(error: *mut *mut c_char, message: &Error) -> i32 {
     if !error.is_null()
-        && let Ok(message) = CString::new(message)
+        && let Ok(message) = CString::new(message.to_string())
     {
         // SAFETY: the caller promises one writable pointer at `error`.
         unsafe { ptr::write(error, message.into_raw()) };

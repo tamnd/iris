@@ -16,3 +16,9 @@ lcov.info
 .vscode/
 __pycache__/
 *.pyc
+
+# What building the Python wheel leaves behind. The wheel itself is a release artefact and the
+# virtual environment is one developer's, so neither is a thing the repository should carry.
+/crates/iris-py/dist
+.venv/
+.pytest_cache/

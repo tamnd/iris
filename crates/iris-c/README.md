@@ -10,6 +10,8 @@ Errors are handed back with the call that produced them. Every fallible entry po
 
 A dataset holds the bytes it was opened over and opens the container again for each scan. A borrow is not a thing that crosses a C boundary, and the alternative is a struct that points into itself, sound only by an argument nobody reviewing a file like this should have to check. Reopening costs about four hundredths of a millisecond against the decoder pool, which `docs/COLD_START.md` measures, and the name and the schema are read once and kept.
 
+Under the `extern "C"` layer there is a safe Rust one, on `IrisRuntime` and `IrisDataset`, and the entry points are adapters over it that check pointers and turn an error into a message. That split is there because `iris-py` is a wrapper over this ABI rather than a second implementation of it, and a wrapper written against raw pointers would be ceremony with unsafe in it. Python and C get the same open, the same projection rule and the same reopen behaviour because there is one implementation of all three.
+
 Not on crates.io. What this crate produces is a shared library, a static library and a header, none of which is a thing cargo installs, so they come out of the release rather than out of the registry.
 
 Part of [iris](https://github.com/tamnd/iris). Licensed under Apache-2.0.
