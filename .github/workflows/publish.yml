@@ -11,10 +11,22 @@ on:
         required: true
         type: string
       dry_run:
-        description: Resolve and package every crate without uploading anything
+        description: Package every crate and upload the wheels to TestPyPI, touching neither real index
         required: false
         default: true
         type: boolean
+      # A patch is work in the middle of a milestone and does not go to crates.io, which is the rule
+      # in docs/RELEASING.md, and before this input the only way to honour it while still shipping a
+      # wheel was to remember not to press the button. A run says which indexes it is for.
+      registries:
+        description: Which indexes this run is for
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - crates-io
+          - pypi
 
 permissions:
   contents: read
@@ -31,6 +43,7 @@ env:
 jobs:
   publish:
     name: Publish to crates.io
+    if: ${{ inputs.registries != 'pypi' }}
     runs-on: ubuntu-24.04
     # The first publish of this workspace has to wait out the crates.io limit on new names, which is
     # roughly ten minutes each once the initial burst is used up. Every publish after it is quick.
@@ -89,6 +102,7 @@ jobs:
   # wheel, and probably is not the word wanted on the one step that cannot be undone.
   pypi:
     name: Publish to PyPI
+    if: ${{ inputs.registries != 'crates-io' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: pypi
