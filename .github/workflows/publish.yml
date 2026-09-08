@@ -95,7 +95,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Fetch the wheels from the release
@@ -119,9 +119,34 @@ jobs:
         run: |
           python -m pip install --upgrade pip twine
           python -m twine check wheels/*.whl
+
+      # A dry run uploads to TestPyPI, which is the whole point of TestPyPI and is worth more than
+      # a metadata check. It exercises the credential, the endpoint, the metadata PyPI actually
+      # validates and the five filenames, so the real upload is a rehearsed step rather than a first
+      # attempt. `skip-existing` is on because a dry run gets rerun and a version there is as
+      # permanent as a version anywhere else.
+      #
+      # Both steps below say `release/v1` rather than `v1`, because this is the one action here that
+      # does not tag a major version. That branch is the channel its own documentation points at.
+      - name: Rehearse it on TestPyPI
+        if: ${{ inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheels
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.TEST_PYPI_TOKEN }}
+          skip-existing: true
+          print-hash: true
+
+      # The official action rather than a twine invocation, because it is the one thing in this file
+      # that PyPI itself maintains against its own API, and because moving to trusted publishing
+      # later means deleting the `password` line and adding `id-token: write` rather than rewriting
+      # the step. Attestations need that move: they are signed with the OIDC identity of this job and
+      # an API token cannot produce one.
       - name: Upload
         if: ${{ !inputs.dry_run }}
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: python -m twine upload --non-interactive wheels/*.whl
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheels
+          password: ${{ secrets.PYPI_TOKEN }}
+          print-hash: true

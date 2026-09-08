@@ -85,9 +85,17 @@ That is the part worth knowing. The wheels are downloaded from the GitHub releas
 
 So the order is: cut the tag, let `Release` finish, publish the GitHub release, then run `Publish`. Running `Publish` before the release exists gets a job that cannot find any wheels, which is the right failure.
 
-`PYPI_TOKEN` is a secret on the `pypi` environment and is read only by that job. The distribution is `irisdb` and the module it installs is `iris`, for the same reason as on crates.io and written up in the section above about the name.
+A dry run here is not a metadata check. It uploads the five wheels to TestPyPI, which is what TestPyPI is for, so the credential, the endpoint, the metadata the index actually validates and the five filenames have all been exercised before the real upload runs. The real upload is then a step that has been rehearsed rather than a first attempt. A rerun of a dry run skips what is already there, because a version on TestPyPI is as permanent as a version anywhere else.
 
-Minors only, the same as crates.io, and for the same reason.
+The upload is `pypa/gh-action-pypi-publish` rather than a `twine` invocation. It is the one thing in that file PyPI maintains against its own API, and it is also the path to trusted publishing: moving to it means deleting the `password` line and adding `id-token: write` rather than rewriting the step. That move is worth making. Attestations are signed with the OIDC identity of the job that built the artefact and an API token cannot produce one, so until it happens what goes to PyPI carries no provenance while the binaries on the GitHub release do.
+
+`PYPI_TOKEN` and `TEST_PYPI_TOKEN` are secrets on the `pypi` environment and `CARGO_REGISTRY_TOKEN` is a secret on the `crates-io` environment. None of them is a repository secret. A repository secret is readable by every job in every workflow in the repository, and a token that can publish a permanent version should be readable by the one job that publishes.
+
+The distribution is `irisdb` and the module it installs is `iris`, for the same reason as on crates.io and written up in the section above about the name.
+
+Minors only after the first one, the same as crates.io, and for the same reason. The first upload is the exception and it is `0.8.1`, a patch, because a name on PyPI belongs to whoever registers it and there was no reason to leave `irisdb` unclaimed through the rest of M8 for the sake of a rule about which numbers go where.
+
+There is no source distribution, only wheels. An sdist for this package is a Rust workspace with a path dependency on `iris-c` that sits outside the crate directory, so what it would offer somebody on an unlisted platform is a build that needs a Rust toolchain and probably fails anyway. A clear message that there is no wheel for a platform is better than a build error twenty minutes in.
 
 ## The fleet
 
