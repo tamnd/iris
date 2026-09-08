@@ -83,11 +83,13 @@ Three self hosted runners exist alongside the hosted ones, and the `Fleet` workf
 
 | Label | What it is | Jobs |
 | --- | --- | --- |
-| `epyc-6c-12gb` | AMD EPYC virtual machine, 6 vCPUs, 12 GB, Ubuntu 24.04 | 4 |
+| `epyc-6c-12gb` | AMD EPYC virtual machine, 6 vCPUs, 12 GB, Ubuntu 24.04 | 3 |
 | `epyc-8c-24gb` | AMD EPYC virtual machine, 8 vCPUs, 24 GB, Ubuntu 24.04 | 6 |
 | `i9-13900k-64gb` | Intel Core i9-13900K, 32 threads, 64 GB, Windows 11 | 16 |
 
 The job count is set per machine rather than left to cargo, which sizes itself by core count and pays no attention to memory. Building Wasmtime wants well over a gigabyte per job and the smaller machines here do not have that much per core.
+
+The 12 GB machine was on four and that was still too many. The OOM killer took processes out of the runner's own service, the service stopped and did not retry, and the machine then sat offline while everything queued behind the other two, which reads as a slow queue rather than as a machine that fell over. So it is on three, and the same cap is in that runner's `.env` as well, because the number in the workflow only covers the workflow and the `.env` covers anything else that ever runs there.
 
 A fourth machine, four cores and six gigabytes, is not in the fleet. It is already a Kubernetes node and sits at a load average around fifty with about a hundred megabytes free, so a build there would take hours, thrash, and slow down the thing the machine is actually for. Its runner was removed rather than left idle, so that what is registered and what is used are the same list.
 

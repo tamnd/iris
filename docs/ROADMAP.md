@@ -229,6 +229,14 @@ A C ABI, Python bindings, a DuckDB extension, and the Parquet embedding.
 
 **Gate.** The C ABI installs and runs on a machine that has never seen it, on all three desktop platforms. An `iris` decoder embedded in Parquet file metadata works both ways: readers that do not know about it read the file normally, and readers that do use the embedded decoder. That last item is written up as a proposal to the Parquet community with numbers attached. It is the highest leverage adoption route in the plan and the only one that requires nobody to adopt anything. Parquet v2 encodings shipped a decade ago and remain underused specifically because writers cannot be sure readers support them, which is ossification, measured, in a paper arguing against this approach.
 
+### What the C ABI came out as
+
+Ten functions, and the reason there are only ten is that everything with structure in it comes back as an Arrow C structure. A schema is an `ArrowSchema` and a scan is an `ArrowArrayStream`, so the header has no description of what a column is, what a null is or what a string is, because all three are already agreed on by every consumer worth handing bytes to. What that costs is that reading the values needs an Arrow library. What it buys is that there is no iris specific data model for anybody to learn or for us to keep compatible.
+
+Two smaller decisions are worth writing down because both went against the obvious answer. There is no `iris_last_error`, which is what a C library normally does, because the slot behind it is per thread state and `ci/discipline.py` refuses that anywhere in this tree, so a message is an owned out parameter handed back with the call that produced it. And a dataset holds the bytes it was opened over and opens the container again for each scan rather than holding a borrow into itself, which costs about four hundredths of a millisecond against the decoder pool and removes a self referential struct that somebody would otherwise have to check the soundness of.
+
+The gate is in the `Release` workflow rather than in CI, because what goes wrong with a native library is not that it fails a test, it is that it does not link or does not load on a machine that is not the one that built it. So the workflow builds the archive, deletes the Rust toolchain off the runner, checks that `cargo` and `rustc` are gone, and compiles the sample program with nothing but the platform's own compiler on Linux, macOS and Windows. Publishing waits on it.
+
 ## Decision points
 
 Places to stop and reassess rather than push through.

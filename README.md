@@ -39,11 +39,12 @@ Every performance claim here is settled in [`tamnd/iris-bench`](https://github.c
 | `iris-runtime` | The thing an engine embeds. Ties the above together into a scan. |
 | `iris-native` | The substitution table, and the differential run that is the only way into it. Native implementations of decoders the host already knows, keyed on the digest of the module and on nothing else, and admitted only after being compared to that module byte for byte. |
 | `iris-df` | A DataFusion table provider. Registers a container as a table and pushes projections into it. |
+| `iris-c` | The C ABI. A shared library, a static library and one header, handing back Arrow C structures. |
 | `irisdb` | The command line tool: inspect, verify, decode, bundle. Installs a binary called `iris`. |
 
 Every crate is `iris-something` except the command line tool, which is `irisdb` on crates.io because the bare name is on the registry's reserved list. `cargo install irisdb` gives you a binary called `iris`.
 
-The DataFusion integration is `iris-df`. The others (DuckDB, a C ABI, and Python bindings) are planned and are not in this tree yet. They arrive at M8.
+The DataFusion integration is `iris-df` and the C ABI is `iris-c`, which is described for a C programmer in [`docs/C_ABI.md`](docs/C_ABI.md) and ships as a shared library, a static library and a header attached to a release rather than as a crate. The rest of M8 (DuckDB and Python bindings) is planned and is not in this tree yet.
 
 ## Building
 
