@@ -54,11 +54,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04 }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
-          - { target: aarch64-apple-darwin, os: macos-latest }
-          - { target: x86_64-apple-darwin, os: macos-latest }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, platform: linux_amd64 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, platform: linux_arm64 }
+          - { target: aarch64-apple-darwin, os: macos-latest, platform: osx_arm64 }
+          - { target: x86_64-apple-darwin, os: macos-latest, platform: osx_amd64 }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, platform: windows_amd64 }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -84,10 +84,21 @@ jobs:
           # The C ABI, which is a shared library, a static library and a header rather than anything
           # cargo installs, so the release is the only way anybody gets it.
           cargo build --release --locked --target "$TARGET" -p iris-c
+      # The DuckDB extension, which is also not a thing cargo installs. Nothing on this runner has
+      # DuckDB on it and nothing needs to: the crate is built against the C extension API and names
+      # no DuckDB symbol, which is exactly what lets one machine build the artefact for five
+      # platforms. The session that checks the answers is in CI, on one platform, because a wrong
+      # answer is wrong everywhere and a build that will not load is what a matrix is for.
+      - name: The DuckDB extension
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: ci/duckdb-extension.sh --target "$TARGET"
       - name: Package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
           name="iris-${GITHUB_REF_NAME}-${TARGET}"
@@ -131,6 +142,21 @@ jobs:
           cp docs/C_ABI.md "$out/"
           cp sample.iris "$out/"
           cp LICENSE NOTICE README.md "$out/"
+
+          # The DuckDB extension goes out as its own asset rather than inside the archive above,
+          # because it is loaded by a database and not linked by a program and the two have nothing
+          # to do with each other. Zipped, and the name inside the zip is the part that matters:
+          # DuckDB takes the name of an extension from its file name and then looks for an entry
+          # point called after it, so a file called anything but iris.duckdb_extension loads and then
+          # cannot find the function it came for. The platform goes in the name of the zip, where it
+          # helps somebody choose, and not in the name of the file, where it would break the load.
+          root=$PWD
+          ext="iris-${GITHUB_REF_NAME}-${PLATFORM}.duckdb_extension.zip"
+          if [[ "$TARGET" == *windows* ]]; then
+            (cd target/duckdb && 7z a "$root/dist/$ext" iris.duckdb_extension >/dev/null)
+          else
+            zip -j "dist/$ext" target/duckdb/iris.duckdb_extension
+          fi
 
           cd dist
           if [[ "$TARGET" == *windows* ]]; then

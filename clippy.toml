@@ -1,0 +1,5 @@
+# clippy reads a word with a capital letter inside it as an identifier somebody forgot to put in
+# backticks. Sometimes it is right. `DuckDB` is not an identifier, it is the name of a database, and
+# a paragraph that writes it in code font every time it comes up reads like a machine wrote it. The
+# `..` keeps clippy's own list of these, which is where `OpenGL` and the rest of them live.
+doc-valid-idents = ["DuckDB", ".."]

@@ -57,6 +57,12 @@ cap-std = "4.0.3"
 # table provider with no way to show that it works.
 datafusion = { version = "55.0.0", default-features = false, features = ["sql"] }
 clap = { version = "4.6.6", features = ["derive", "wrap_help"] }
+# The DuckDB extension is built against the C extension API rather than against DuckDB, so nothing
+# here compiles or links a database. `loadable-extension` reaches every entry point through the
+# function table DuckDB hands the extension at load, and `vtab-arrow` is the table function trait and
+# the Arrow to DuckDB conversion. This pulls its own Arrow, an older major than the one the rest of
+# the workspace is on, and that is fine and is explained in `crates/iris-duckdb/src/lib.rs`.
+duckdb = { version = "1.10505.0", features = ["loadable-extension", "vtab-arrow"] }
 # One trait and one combinator, for draining an object store's byte stream and a Parquet
 # reader's batch stream in the remote scan probe. Both of those are streams and there is no way to
 # read one without naming the trait that says so.

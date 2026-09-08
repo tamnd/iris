@@ -247,6 +247,16 @@ The buffers are not copied, and the gate asked for that to be true rather than c
 
 The clean machine gate is the same shape as the C one and for the same reason. The `Release` workflow builds a wheel for each of five targets, deletes the Rust toolchain, installs the wheel from the file with the package index turned off, and runs the Python tests against a container built elsewhere, on Linux, macOS and Windows. What goes to PyPI afterwards is downloaded from that release rather than built a second time, because a wheel built again from the same tree would probably be the same wheel and probably is not the word wanted on a step that cannot be undone.
 
+### What the DuckDB extension came out as
+
+275 lines, of which 146 are code. With the build script, the metadata writer and the session test that checks the answers, the whole integration is 552 lines. BtrBlocks reached DuckDB in 586 lines and three person days, which was the number this item was written against, and coming out at about the same size is the finding. The claim M8 exists to support is that a self describing format is cheap for an engine to adopt, and the honest way to support it was to do the work and report the number rather than to argue that it would be small.
+
+It is one table function, `iris_scan(path)`. Bind opens the container and declares the columns out of its schema, init takes the projection DuckDB worked out, and the scan reads those columns and no others, so a projection goes to the decoder rather than being applied after the fact. A `count(*)` projects nothing at all, which is a path of its own: one column is read to find out how many rows there are and none of it is written out, because asking iris for no columns means asking for all of them.
+
+Two things about it were not expected. The first is that the `duckdb` crate is a major version of Arrow behind this workspace, which would normally be a fork or a wait, and crossing it turned out to be two functions of one line each because what moves between the two halves is an `ArrowSchema` and an `ArrowArrayStream` from the Arrow C data interface. That is this project's own argument about file formats arriving uninvited in a dependency graph, and it is worth noticing that the reason it costs nothing is that somebody specified the boundary as a byte layout rather than as a set of types.
+
+The second is that nothing in the crate links DuckDB. Every function it calls is reached through the table of pointers DuckDB hands an extension when it loads it, so the artefact is built on machines that have no DuckDB installed and only the test needs one. That test is a real session against a real container, because a library whose callees do not exist until a database loads it has no honest unit test.
+
 ## Decision points
 
 Places to stop and reassess rather than push through.
