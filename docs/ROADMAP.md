@@ -269,7 +269,17 @@ Both of those readers can also see the two keys without being taught anything, w
 
 Nothing about the embedding survives a rewrite through another writer, and the rows do. That is checked rather than assumed, because a documented behaviour nobody checks is a hope.
 
-The crate is 332 lines, of which 158 are code, and with the examples, the tests and the script that drives the other readers it comes to 939. It depends on `iris-format` and on Parquet and not on the runtime, so a reader with no interest in iris can depend on it to find out whether a file carries a container without pulling a wasm engine in behind it.
+The crate is 333 lines, of which 159 are code, and with the examples, the tests and the scripts that drive the other readers it comes to 1,257. It depends on `iris-format` and on Parquet and not on the runtime, so a reader with no interest in iris can depend on it to find out whether a file carries a container without pulling a wasm engine in behind it.
+
+### What the proposal argues, and what it had to measure first
+
+`docs/PARQUET_PROPOSAL.md` is the M8 proposal. It asks the Parquet community for no format change, no encoding and no code, and it argues one point: a writer may put bytes where no offset names them, and a reader that has never heard of them is unaffected.
+
+The argument needed a number the embedding work had not produced. That a reader pays nothing was reasoned from where the bytes are, and reasoning is what the proposal is trying to replace. `ci/parquet-cost.py` measures it, against the same fixture written three ways by the same writer: with no container, with the container in the gap, and with it base64 encoded into the file metadata where the format says extensions belong.
+
+The gap costs nothing that this machine can see, and the metadata costs a great deal. On a 6.5 MB container the footer goes from 1,149 bytes to 8,632,952, and opening the file goes from 0.05 ms to 6.7 on pyarrow and from 0.2 to 3.1 on DuckDB, before a row is read. Every group of timings ends with the plain file measured a second time under another name, so two numbers in every row are the same file and nothing smaller than the distance between those two is a finding.
+
+The precedent matters as much as the measurement. `parquet.writer.max-padding` in parquet-java has defaulted to 8 MB since 2015, so files with unreferenced bytes in them have been written by the reference implementation for a decade and every reader ignores them. The proposal asks whether that tolerance is written down anywhere, whether the two keys should have a name that belongs to no vendor, and whether anybody can see the failure mode that two readers did not.
 
 ## Decision points
 

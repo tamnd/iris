@@ -83,4 +83,32 @@ check "duckdb can see the pointer" "$(value "$WORK/readers.txt" duckdb_sees_keys
 check "a rewrite drops the container" "$(value "$WORK/readers.txt" rewrite_carries_container)" "no"
 check "a rewrite keeps the rows" "$(value "$WORK/readers.txt" rewrite_sum)" "$(value "$WORK/decode.txt" sum)"
 
+# The same rows written three ways, which is what `docs/PARQUET_PROPOSAL.md` argues from. The
+# timings in that document came off a machine nobody else was using and are not asserted here,
+# because a number that moves with the neighbours is not a thing to fail a build over. What is
+# asserted is the part that does not move: where each of the three puts the container, and how much
+# of the footer that costs. The footer is what every reader parses whether it wants the file or not.
+echo "== the same rows written three ways =="
+cargo run --release --locked -p iris-parquet --example variants -- "$CONTAINER" "$WORK/variants" \
+  | tee "$WORK/variants.txt"
+"$PYTHON" ci/parquet-cost.py "$WORK/variants" --repeats 3 | tee "$WORK/cost.txt"
+
+check "the container in the gap is the container" \
+  "$(value "$WORK/cost.txt" container)" "$(value "$WORK/embed.txt" container)"
+
+# The pointer is two short strings and inlining is the whole container, base64, in the one part of
+# the file nobody gets to skip. A hundred bytes of footer against several times the container.
+POINTER=$(($(value "$WORK/cost.txt" footer_gap) - $(value "$WORK/cost.txt" footer_plain)))
+if [ "$POINTER" -gt 1024 ]; then
+  echo "the pointer costs the footer $POINTER bytes, which is more than it should" >&2
+  exit 1
+fi
+echo "the pointer costs the footer: $POINTER bytes"
+
+if [ "$(value "$WORK/cost.txt" footer_inline)" -le "$(value "$WORK/cost.txt" container)" ]; then
+  echo "the inline footer is somehow no larger than the container it holds" >&2
+  exit 1
+fi
+echo "inlining costs the footer: $(value "$WORK/cost.txt" footer_inline) bytes"
+
 echo "PARQUET_EMBED_GREEN"
