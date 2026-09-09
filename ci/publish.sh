@@ -201,7 +201,7 @@ publish_crate() {
   done
 }
 
-# A dry run is one command rather than ten, because `cargo publish --dry-run` on a single crate
+# A dry run is one command rather than thirteen, because `cargo publish --dry-run` on a single crate
 # resolves its dependencies against crates.io, and on a first release the crate it depends on is not
 # there yet, so every package after the first one fails for a reason that has nothing to do with the
 # release. `cargo package --workspace` builds a temporary registry out of the workspace, so each
@@ -209,8 +209,35 @@ publish_crate() {
 check_order
 
 if [ -n "$DRY_RUN" ]; then
-  echo "== packaging and verifying every crate, uploading nothing"
-  cargo package --workspace --locked
+  # `--workspace` means every member and not every publishable member, so the crates that are marked
+  # `publish = false` are packaged too, and one of them cannot be. `iris-duckdb` depends on `iris-c`
+  # by path with no version on it, which is correct, because `iris-c` produces a shared library and a
+  # header rather than a crate anybody installs and is never going on crates.io for that version to
+  # point at. Packaging refuses a dependency with no version, so the crate that is not being
+  # published fails the rehearsal for the twelve that are.
+  #
+  # The list of what to leave out is read from the manifests rather than written down here, because a
+  # written down list is a list that is wrong the first time somebody adds a crate.
+  unpublished=()
+  excluded=()
+  while read -r crate; do
+    [ -n "$crate" ] || continue
+    unpublished+=("$crate")
+    excluded+=(--exclude "$crate")
+  done < <(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys
+
+for package in json.load(sys.stdin)["packages"]:
+    if package["publish"] == []:
+        print(package["name"])')
+
+  if [ "${#excluded[@]}" -eq 0 ]; then
+    echo "no crate in this workspace is marked publish = false, which is not what this expects" >&2
+    exit 1
+  fi
+
+  echo "== packaging and verifying every crate that is going out, uploading nothing"
+  echo "-- left out, because they are never published: ${unpublished[*]}"
+  cargo package --workspace --locked "${excluded[@]}"
   echo "done"
   exit 0
 fi
