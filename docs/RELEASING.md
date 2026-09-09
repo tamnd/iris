@@ -23,7 +23,7 @@ The tag points at the release commit rather than at whatever is on the default b
 
 ## Publishing to crates.io
 
-Minors go to crates.io and patches do not. A patch is work in the middle of a milestone, so it is a tag and a GitHub release and nothing more, and the versions on crates.io are the trees where a milestone finished. That is why the list there reads `0.3.0`, `0.4.0`, `0.5.0` and so on with nothing in between, while the tag list has the patches too. Anybody wanting a tree between two minors has the tag and can build it. The `0.2.x` run at the bottom of the list is the exception and the section below says why.
+Minors go to crates.io and patches do not. A patch is work in the middle of a milestone, so it is a tag and a GitHub release and nothing more, and the versions on crates.io are the trees where a milestone finished. That is why the list there reads `0.3.0`, `0.4.0`, `0.5.0` and so on with nothing in between, while the tag list has the patches too. Anybody wanting a tree between two minors has the tag and can build it. The `0.2.x` run at the bottom of the list is one exception and `0.9.1` is another, and the paragraphs below say why for both.
 
 crates.io starts at `0.2.0` rather than at `0.1.0`, and that is deliberate. `v0.1.0` was tagged at the tree where M0 finished, before any of the publishing machinery existed, and by the time it did exist the command line package had been renamed because `iris-cli` belongs to somebody else. Publishing `0.1.0` from a tree that is not the one the tag points at would make the tag a lie for the sake of a round number. `v0.1.1` was tagged while M1 was still in progress and the first publish of it never got past the limit on new names, so rather than spend an hour creating ten names for a tree nobody would install, the first version on crates.io is the one where M1 finished.
 
@@ -34,6 +34,8 @@ The gap is not a problem to fix later. A version that exists as a tag and not on
 Nothing about that is recoverable in place, because a version on crates.io is permanent. The workflow now checks out `v<version>` rather than a branch, so a version is one tree whether or not the run is quick, and the fix for the release itself was the next patch.
 
 `0.2.1` then published nine of the ten and stopped on the tenth, for an unrelated reason: the command line package was called `iris` and crates.io holds that name in reserve. That is the section below on the name. The nine that went out are all one tree, so `0.2.1` is still the first coherent version, and the tenth is simply missing from it. `irisdb` first appears at `0.2.2`, which is the first tag whose tree contains that name, rather than being back filled at `0.2.1` from a tree the `v0.2.1` tag does not point at. That is the same rule as the paragraph above: a version that is a tag and not on crates.io is readable from the tag list, and a version published from the wrong tree is not readable from anywhere.
+
+`0.9.0` is a tag and a GitHub release and is on neither registry, which is the other exception to the rule at the top of this section. Its dry run failed on the packaging problem described two paragraphs down, and because the workflow checks out `v<version>` rather than a branch, the fix for it cannot reach a tag that already exists. Retagging `v0.9.0` would move a release that has already been published with its assets, which is the thing this page keeps saying not to do, so `0.9.0` stays where it is and the patch that carries the fix is the version that goes out. That is why a patch is on crates.io: it is the first tree in the `0.9` line that can be published at all.
 
 The `Publish` workflow is manual, takes the version as an input, and defaults to a dry run. Run it as a dry run first. It checks that the version matches the tree, builds, tests, and then packages every crate without uploading anything.
 
@@ -47,7 +49,7 @@ When that passes, run it again with the dry run box unticked.
 
 crates.io limits how fast new crate *names* can be created much harder than it limits new versions of a crate that already exists. This workspace publishes thirteen crates, and the first release had to wait out that limit for every one of them. Expect that one to take upward of an hour. Every publish after it takes a few minutes.
 
-The limit comes back whenever a release adds a name rather than a version. `0.9.0` is the first release with `iris-parquet` in it, so that one name goes through the new name limit while the other twelve do not, and a run that stops on it has published everything else and can be rerun.
+The limit comes back whenever a release adds a name rather than a version. `0.9.1` is the first release with `iris-parquet` in it, so that one name goes through the new name limit while the other twelve do not, and a run that stops on it has published everything else and can be rerun.
 
 `ci/publish.sh` does not guess at how long to wait. When crates.io answers 429 it names the time the next name is due, and the script reads that time out of the response and sleeps until it, with a minute of margin. That is worth doing rather than picking an interval because the interval is not documented, it depends on how much of the account's burst is left, and a guess that is thirty seconds short costs another full wait rather than another thirty seconds.
 
