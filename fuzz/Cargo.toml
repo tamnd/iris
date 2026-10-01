@@ -26,7 +26,7 @@ iris-source = { path = "../crates/iris-source", features = ["probe"] }
 # the workspace, which is what keeps a sanitizer build of it out of an ordinary `cargo test`.
 arrow-array = "59.3.0"
 arrow-buffer = "59.3.0"
-arrow-data = "59.3.0"
+arrow-data = "60.0.0"
 arrow-schema = "59.3.0"
 
 # The window target needs a real file on a real filesystem, because a mapping is the thing under
