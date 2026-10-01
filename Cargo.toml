@@ -39,7 +39,7 @@ iris-vm = { path = "crates/iris-vm", version = "0.9.1" }
 m5-decode = { path = "crates/m5-decode" }
 
 anyhow = "1.0.104"
-arrow-array = "59.3.0"
+arrow-array = "60.0.0"
 arrow-buffer = "59.3.0"
 arrow-data = "59.3.0"
 arrow-ipc = "59.3.0"
