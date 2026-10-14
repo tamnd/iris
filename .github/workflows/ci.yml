@@ -244,7 +244,7 @@ jobs:
         with:
           key: parquet
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: The two readers

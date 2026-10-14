@@ -141,7 +141,7 @@ jobs:
       # is no `v2` on scorecard-action, only the full versions, so asking for a major tag fails the
       # job before it starts with an action that cannot be resolved. This one moves when somebody
       # bumps it.
-      - uses: ossf/scorecard-action@v2.4.4
+      - uses: ossf/scorecard-action@v2.5.0
         with:
           results_file: results.sarif
           results_format: sarif
