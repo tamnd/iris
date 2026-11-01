@@ -27,7 +27,7 @@ iris-source = { path = "../crates/iris-source", features = ["probe"] }
 arrow-array = "59.3.0"
 arrow-buffer = "59.3.0"
 arrow-data = "59.3.0"
-arrow-schema = "59.3.0"
+arrow-schema = "60.1.0"
 
 # The window target needs a real file on a real filesystem, because a mapping is the thing under
 # test and there is no way to map bytes that are not in a file.
