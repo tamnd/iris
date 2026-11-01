@@ -41,7 +41,7 @@ m5-decode = { path = "crates/m5-decode" }
 anyhow = "1.0.104"
 arrow-array = "59.3.0"
 arrow-buffer = "59.3.0"
-arrow-data = "59.3.0"
+arrow-data = "60.1.0"
 arrow-ipc = "59.3.0"
 arrow-schema = "59.3.0"
 # object_store's trait is an `#[async_trait]` one, so implementing it means using the same macro it
